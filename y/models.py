@@ -79,3 +79,71 @@ class BranchMLP(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return self.head(self.body(x))
+
+
+class NarrowBottleneckBlock(nn.Module):
+    """Ordinary learned local expansion/compression at a narrow interface.
+
+    This is the mandatory non-dendritic control for Y. With receiver width R,
+    choose local_width so the two matrices have the same weight count as a
+    K-branch BranchReduceLinear:
+
+        2 * R * local_width = K * R^2
+        local_width = K * R / 2.
+    """
+
+    def __init__(self, receiver_width: int, local_width: int) -> None:
+        super().__init__()
+        self.up = nn.Linear(receiver_width, local_width, bias=False)
+        self.act = nn.ReLU()
+        self.down = nn.Linear(local_width, receiver_width, bias=False)
+        self.receiver_width = receiver_width
+        self.local_width = local_width
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.down(self.act(self.up(x)))
+
+
+class BottleneckMLP(nn.Module):
+    """Same narrow interface and hidden weight budget as BranchMLP, but ordinary MLP compression."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        receiver_width: int,
+        depth: int,
+        branches: int,
+        classes: int,
+    ) -> None:
+        super().__init__()
+        if depth < 1:
+            raise ValueError("depth must be >= 1")
+        root = int(math.isqrt(branches))
+        if root * root != branches:
+            raise ValueError("BottleneckMLP currently requires a perfect-square branch count")
+        if (branches * receiver_width) % 2 != 0:
+            raise ValueError("branches * receiver_width must be even")
+        local_width = branches * receiver_width // 2
+
+        # Keep the fixed-input boundary identical to BranchMLP so the control
+        # isolates how internal local compute is compressed to the receiver.
+        layers: list[nn.Module] = [
+            BranchReduceLinear(
+                input_dim,
+                receiver_width,
+                root,
+                reduction="mean",
+                bias=False,
+            )
+        ]
+        for _ in range(depth - 1):
+            layers.append(NarrowBottleneckBlock(receiver_width, local_width))
+        self.body = nn.Sequential(*layers)
+        self.head = nn.Linear(receiver_width, classes, bias=False)
+        self.receiver_width = receiver_width
+        self.local_width = local_width
+        self.branches_equivalent = branches
+        self.depth = depth
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.head(self.body(x))
