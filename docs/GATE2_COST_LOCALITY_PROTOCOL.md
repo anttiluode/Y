@@ -1,39 +1,44 @@
 # Gate 2 — cost/locality protocol
 
 **Date:** 2026-08-16  
-**Status:** instrument under construction; no Gate-2 result yet.
+**Status:** capacity/fairness audit completed; hardware/locality gate open.
 
 ## Why Gate 2 exists
 
-Gate 1 killed the first candidate Y block on the first external dataset.  At a
-quarter-width receiver, cheap sparse pre-collapse correction did not preserve
-the ordinary dense bottleneck's Digits accuracy.  The 50% receiver-budget
-candidate merely tied the dense bottleneck.
+Y began by asking whether an interior learned pre-collapse receiver could beat
+both a fixed dendritic-style reducer and an ordinary dense bottleneck under a
+hard communication width.
 
-So Y is not allowed to add routing, growth, temporal state, or another
+Gate 1 did **not** find such an interior winner. Gate 2 then uncovered a more
+important methodological fact: the historical fixed receiver used branch
+**mean**, whereas the motivating Wu-style block is a branch **sum**. Those maps
+have identical connectivity and differ only by a constant factor, but the
+constant badly changed optimization in Y's unnormalized MLP.
+
+The scale-controlled audit in `docs/GATE2_FAIRNESS_RECEIPT.md` therefore
+supersedes the old strong interpretation of the fixed-branch null.
+
+After parameter-free normalization, dense, grouped, and fixed local aggregation
+all occupied essentially the same Digits accuracy band. No special learned
+receiver was established.
+
+So Gate 2 is now the systems question it should be:
+
+> **If local nonlinear aggregation can preserve task capacity at a narrow
+> receiver, can the wide local state actually remain local on real hardware?**
+
+Y is still not allowed to add routing, growth, temporal state, or another
 biological nonlinearity as a rescue.
-
-The surviving question is more ordinary:
-
-> **If a rich learned pre-collapse reducer is required, can standard
-> structured/local reducers preserve the dense bottleneck's accuracy while
-> materially changing measured hardware cost?**
-
-This gate is deliberately a control gate.  Low rank, grouped/block linear
-layers, and fixed branch aggregation are prior art / standard mechanisms.  A
-win by one of them is useful even if it leaves Y with no novel primitive.
 
 ---
 
 ## Paper boundary
 
-Wu et al. (2026), *Dendritic nonlinearities mitigate communication costs*,
-argue that the useful advantage of active-dendrite-style architectures is not
-extra capacity once model complexity is controlled, but localized nonlinear
-aggregation that can reduce the width communicated onward.  Their analysis
-also makes clear that the extra local synaptic access has a cost of its own;
-shrinking the inter-layer vector is not automatically equivalent to lower
-physical memory traffic.
+Wu et al. motivate active-dendrite-style computation as localized nonlinear
+aggregation: many branch/synaptic computations feed a narrower neuron output.
+The engineering claim is not that a narrow logical tensor automatically means
+less hardware traffic. The extra local synaptic access and aggregation have
+costs too.
 
 Y therefore keeps these quantities separate:
 
@@ -41,7 +46,8 @@ Y therefore keeps these quantities separate:
 logical receiver width
 learned parameter count
 multiply/add count
-local activation width
+wide local activation width
+whether that activation is materialized
 PyTorch allocated memory
 kernel count / launch behavior
 wall-clock latency
@@ -49,13 +55,16 @@ physical DRAM traffic
 energy
 ```
 
-Only the middle hardware quantities are measured by the first Gate-2 harness.
-Physical DRAM traffic needs Nsight/CUPTI-class counters or an equivalent
-hardware profiler.
+A reference PyTorch graph may expose only R values between modules while still
+writing the full local H-vector to global memory. Such a graph has a narrow API,
+not yet a communication advantage.
+
+Physical DRAM traffic needs hardware counters / an appropriate profiler.
+PyTorch peak allocation alone is not a traffic measurement.
 
 ---
 
-## Matched hidden budget
+# Matched hidden budget
 
 For receiver width `R` and hidden budget factor `K`:
 
@@ -65,195 +74,197 @@ B = K * R^2
 
 All Gate-2 blocks expose exactly `R` values to the next block.
 
-### Dense endpoint
+## Dense endpoint
 
 ```text
 R -> H -> R
+     ReLU
+
 H = K*R/2
 weights = R*H + H*R = B
 ```
 
-This is the ordinary bottleneck that won Gate 1.
+This is the ordinary bottleneck control.
 
-### Low-rank reducer control
+## Low-rank reducer control
 
 ```text
 R -> H -> q -> R
-       ReLU   linear factorization
+     ReLU   linear factorization
 
 weights = R*H + H*q + q*R <= B
 ```
 
-`H` is chosen as large as possible under the budget.  There is no nonlinearity
-between the two reducer factors, so the receiver really is rank `q`.
+There is no nonlinearity between the two reducer factors, so the receiver is
+rank `q`. Gate 2 variance-matches the factor initialization to avoid an
+artificial short-run disadvantage.
 
-### Grouped/block reducer control
+## Grouped/block reducer control
 
 ```text
 R -> H -> R
-       ReLU
+     ReLU
 
-H -> R reduction is block diagonal with G groups.
+H -> R is block diagonal with G groups
 ```
 
-Its learned cost is
+Cost:
 
 ```text
-R*H + R*H/G <= B.
+R*H + R*H/G <= B
 ```
 
-`G=1` is exactly the dense endpoint.  Increasing `G` makes the learned receiver
-more local and spends the saved reducer weights on more private nonlinear
-features.  This gives a clean standard-control frontier rather than inventing
-another bespoke sparse receiver.
+`G=1` is exactly the dense endpoint. Increasing G gives each receiver group a
+more local subset of H and spends the saved reducer weights on additional
+private nonlinear features.
 
-### Fixed branch endpoint
+This is a standard grouped/block-linear control, not a Y novelty claim.
+
+## Fixed local aggregation endpoint
+
+Paper-form topology:
 
 ```text
-R -> K*R -> grouped mean -> R
-       ReLU
+R -> K*R -> grouped SUM -> R
+     ReLU
 ```
 
-All learned budget goes into local feature generation; the reducer is fixed.
-This is the Wu-style endpoint and the Gate-0/Gate-1 null control.
+All learned budget goes into local feature generation and the reducer has no
+learned weights.
+
+Historical Y used grouped **mean**. Keep mean only as a scale diagnostic.
+For architecture/cost claims, mean and sum have the same connectivity; for
+numerical training behavior they are not interchangeable in an unnormalized
+deep stack.
 
 ---
 
-# Phase A — accuracy gate
+# Phase A — capacity/fairness audit: COMPLETE
 
-Dataset: scikit-learn Digits, matching Gate 1.
+See `docs/GATE2_FAIRNESS_RECEIPT.md`.
 
-Default decisive settings:
-
-```text
-R = 32
-K = 16
-receiver ratio vs D=128 = 0.25x
-hidden depth = 4
-10 stratified split seeds
-40 epochs
-paired minibatch order across architectures
-```
-
-Sweep:
+The decisive scale-controlled three-seed / 15-epoch Digits means were:
 
 ```text
-dense
-lowrank q = 4, 8, 16
-grouped G = 2, 4, 8, 16, 32
-fixed branch
+dense             0.961111
+grouped2          0.962963
+grouped4          0.973457
+lowrank4          0.947531
+lowrank8          0.954321
+lowrank16         0.953086
+fixed_mean        0.969753
+fixed_sqrt_sum    0.974074
+fixed_sum         0.973457
 ```
 
-Run:
+No candidate established a significant accuracy advantage at n=3. More
+important, the enormous unnormalized mean-vs-sum gap disappeared after
+parameter-free normalization.
 
-```bash
-python experiments/gate2_cost_locality.py --accuracy-only
+Capacity-side verdict:
+
+```text
+special learned receiver needed          NO
+fixed local aggregation ruled out        NO
+interior grouped winner established       NO
+hardware locality advantage established  NOT YET
 ```
 
-Quick smoke:
-
-```bash
-python experiments/gate2_cost_locality.py --accuracy-only --quick
-```
-
-The accuracy result must be read together with each block's actual parameter
-count and budget slack.  Small integer rounding differences are reported, not
-hidden.
+Do not spend the next cycle extending Digits architecture sweeps unless the
+hardware gate exposes a concrete reason to discriminate among these blocks.
 
 ---
 
 # Phase B — actual CUDA cost gate
 
-Digits is too small to be a trustworthy GPU microbenchmark.  The hardware gate
-therefore benchmarks receiver-to-receiver cores at larger widths and batch
-sizes while keeping the same architectural budget rule.
+The hardware gate uses larger receiver sizes than Digits so launch overhead
+does not completely dominate.
 
-Default microbenchmark:
+Two measurements are required.
+
+## B1. Single-block microcost
+
+Benchmark one receiver-to-receiver block repeatedly on the same input:
 
 ```text
-R = 256
+R = 256 by default
 K = 16
-8 repeated hidden blocks
 batch = 1, 8, 32, 128, 512
-CUDA events for synchronized timing
+FP32 and FP16 separately
 forward latency
-optional forward+backward latency
+forward+backward latency
 peak allocated-memory delta
 ```
 
-Run on the local NVIDIA GPU:
+This permits the exact raw `fixed_sum` operator without repeatedly multiplying
+activation scale through a deep stack.
 
-```bash
-python experiments/gate2_cost_locality.py --hardware-only --bench-backward
+Shortlist:
+
+```text
+dense
+fixed_sum
+grouped2
+grouped4
+lowrank16
 ```
 
-Half precision is a separate measurement, not mixed into the float32 table:
+## B2. Scale-controlled stack
 
-```bash
-python experiments/gate2_cost_locality.py --hardware-only --bench-backward --bench-dtype float16
+Benchmark several hidden blocks with the same parameter-free normalization used
+in the capacity audit:
+
+```text
+(block -> LayerNorm(no affine)) x depth
 ```
 
-Optional compiler comparison:
+All candidates receive the same normalization overhead. This tests end-to-end
+receiver flow without making raw branch-sum scale itself the benchmark.
 
-```bash
-python experiments/gate2_cost_locality.py --hardware-only --compile
-```
-
-Compiler results must be reported separately from eager results because fusion
-can change the conclusion.
-
-Optional PyTorch kernel/allocation trace for one model:
-
-```bash
-python experiments/gate2_cost_locality.py \
-  --hardware-only \
-  --profile-model grouped4 \
-  --profile-batch 128 \
-  --trace artifacts/gate2_grouped4_trace.json
-```
-
-The trace is for kernel structure and PyTorch memory behavior.  It is **not** a
-physical DRAM-byte measurement.
+Report eager and `torch.compile` separately because compiler fusion can change
+the conclusion.
 
 ---
 
-## Gate-2 verdict rules
+## What a useful hardware result looks like
 
-### Outcome A — dense wins accuracy and hardware
+### Outcome A — dense wins both eager and compiled
 
-Stop.  The current Y architecture search has no efficient block.  Keep the
-receiver framing and negative results; do not invent routing to rescue it.
+No efficient Y block yet. Preserve the null. Do not add routing.
 
 ### Outcome B — low rank spans the best frontier
 
-Also mostly stop.  That says an established low-rank receiver explains the
-useful tradeoff.  Y may retain a benchmarking/framing contribution, but not a
-new primitive.
+An established factorization explains the useful tradeoff. That is a practical
+result, not a new primitive.
 
-### Outcome C — grouped/block receiver matches dense accuracy and is cheaper
+### Outcome C — grouped receiver matches cost/accuracy best
 
-Interesting, but still not a novelty claim.  First replicate on a larger task,
-then compare optimized/fused implementations.  Only after standard grouped
-linear baselines are exhausted should Y ask whether context-dependent receiver
-selection adds anything.
+Useful but still standard. Replicate on a second workload and compare against
+optimized grouped-linear implementations before claiming anything new.
 
-### Outcome D — fixed branch becomes cheaper only after fusion
+### Outcome D — fixed local topology preserves accuracy but eager PyTorch loses
 
-That is primarily a replication of Wu et al.'s locality claim.  Useful, but not
-Y novelty.  The next question would be whether a learned local reducer can be
-fused without giving back the communication advantage.
+This is a systems diagnosis, not an architecture failure. Inspect profiler
+traces. If the wide `K*R` activation is materialized and re-read, the next valid
+experiment is a fused projection + nonlinearity + local reduction kernel.
 
-### Outcome E — an interior structured receiver has a robust Pareto win
+### Outcome E — fused/local fixed block is materially cheaper
 
-This is the only outcome that re-opens Gate 3.  The candidate must preserve
-accuracy while improving a measured hardware cost on more than one workload.
-Then, and only then, test whether the receiver should become context dependent.
+That would replicate the motivating locality principle in Y's environment.
+It still is not Y novelty. Replicate on another workload/size before reopening
+learned/context-dependent receivers.
+
+### Outcome F — an interior structured receiver is Pareto-better after honest
+hardware controls
+
+Only then reopen the question of whether the receiver itself should become
+context dependent.
 
 ---
 
 ## Frozen prohibition
 
-Until Gate 2 has a real result, do not add:
+Until Phase B has a real measured result, do not add:
 
 ```text
 WAIT / ROUTE / PROBE controller
@@ -266,5 +277,5 @@ new dendritic activation functions
 
 The project currently lives or dies on an ordinary systems question:
 
-> **Can useful computation stay rich locally while the learned boundary stays
-> narrow without paying the same or greater cost somewhere else?**
+> **Can useful computation stay rich locally while the boundary stays narrow
+> without paying the same or greater cost somewhere else?**
