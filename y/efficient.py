@@ -151,7 +151,11 @@ class GroupedReducerBlock(nn.Module):
             )
         )
         self.act = nn.ReLU()
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        # Treat each [receiver_per_group, local_per_group] slice like an
+        # independent nn.Linear. Generic kaiming_uniform_ on the 3-D tensor
+        # would incorrectly include receiver_per_group in fan-in.
+        bound = 1.0 / math.sqrt(self.local_per_group)
+        nn.init.uniform_(self.weight, -bound, bound)
 
     def forward(self, x: Tensor) -> Tensor:
         h = self.act(self.up(x))
