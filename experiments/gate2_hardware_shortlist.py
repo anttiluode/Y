@@ -1,35 +1,57 @@
 """Gate 2 hardware shortlist after the receiver-scale correction.
 
-This is the hardware-facing instrument Y should run before inventing another
-receiver mechanism.
+This instrument separates two questions that must not be conflated.
 
-The capacity audit found no compelling accuracy distinction among dense,
-grouped, and fixed local aggregation once positive receiver scale was
-controlled.  Hardware is therefore measured on a deliberately short list:
+PAPER REPLICATION AXIS
+----------------------
+At reference narrow width R and budget factor K:
 
-    dense, fixed_sum, grouped2, grouped4, lowrank16
+    wide_point:  D -> D, where D = R*sqrt(K)
+    fixed_sum:   R -> K*R -> grouped nonlinear SUM -> R
 
-Two views are reported:
+Both use K*R^2 learned weights/MACs per sample.  The wide point layer transmits
+sqrt(K) times more activations at the block boundary.  This is the closest
+single-layer analogue here to Wu et al.'s equal-compute point-vs-dendritic
+comparison.
+
+Y PRACTICAL CONTROL AXIS
+------------------------
+The stronger engineering question is whether dendritic/local topology beats
+ordinary ways to keep the *same narrow R-wide boundary*:
+
+    dense, grouped2, grouped4, lowrank16, fixed_sum
+
+All expose R values and spend the same nominal learned-weight budget.  If a
+boring dense bottleneck is faster/cheaper, narrow logical communication alone
+is not a Y result.
+
+Two execution views are supported:
 
 ``micro``
-    One hidden block repeatedly receives the same input.  This permits the
-    exact paper-form raw branch SUM without numerically compounding that scale
-    through a deep stack.
+    One hidden block repeatedly receives the same input.  Exact paper-form raw
+    branch SUM is safe because its scale is not compounded through depth.
 
 ``stack``
     Several independent hidden blocks are chained, with parameter-free
     LayerNorm after every block exactly as in the Gate-2 scale-control audit.
-    All candidates pay the same normalization overhead.
+    All candidates pay the same normalization operation relative to their own
+    boundary width.
 
-The script measures CUDA-event wall clock and PyTorch active-allocation peaks.
-It does NOT infer physical DRAM bytes or energy.  Those require hardware
-counters / an appropriate profiler.
+The most important sweep is *size*.  The motivating paper's GPU analysis says
+small matrices can remain cache-resident and show little advantage; the
+predicted global-memory benefit becomes visible once working sets exceed cache.
+Therefore this script sweeps reference R rather than reporting one cute number.
+
+Measurements here are CUDA-event wall clock and PyTorch active-allocation
+peaks.  They are NOT physical DRAM bytes or energy.  Use Nsight Compute / CUPTI
+or an equivalent hardware-counter profiler for those claims.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 from dataclasses import asdict, dataclass
 from typing import Callable
@@ -47,12 +69,45 @@ from y.efficient import (
 )
 
 
+class WidePointBudgetBlock(nn.Module):
+    """Paper-axis point-neuron control at equal learned complexity.
+
+    If the dendritic/local layer has reference receiver R and K branches, the
+    equal-complexity point layer has width D = R*sqrt(K), because
+
+        D^2 = K*R^2.
+
+    K must therefore be a perfect square for this exact integer control.
+    """
+
+    kind = "wide_point"
+
+    def __init__(self, reference_receiver_width: int, budget_factor: int) -> None:
+        super().__init__()
+        root = int(math.isqrt(budget_factor))
+        if root * root != budget_factor:
+            raise ValueError("wide_point requires budget_factor to be a perfect square")
+        self.reference_receiver_width = int(reference_receiver_width)
+        self.budget_factor = int(budget_factor)
+        self.boundary_width = self.reference_receiver_width * root
+        self.local_width = self.boundary_width
+        self.reducer_weights = 0
+        self.linear = nn.Linear(self.boundary_width, self.boundary_width, bias=False)
+        self.act = nn.ReLU()
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.act(self.linear(x))
+
+
 @dataclass
 class BenchRow:
     mode: str
     candidate: str
     batch: int
-    receiver_width: int
+    reference_receiver_width: int
+    input_width: int
+    boundary_width: int
+    boundary_ratio_vs_wide_point: float
     budget_factor: int
     depth: int
     dtype: str
@@ -62,7 +117,7 @@ class BenchRow:
     local_width: int
     reducer_weights: int
     learned_macs_per_sample_per_block: int
-    logical_receiver_bytes_per_boundary: int
+    logical_boundary_bytes: int
     logical_local_bytes_if_materialized_per_block: int
     forward_ms: float
     forward_backward_ms: float | None
@@ -90,7 +145,16 @@ def dtype_from_name(name: str) -> torch.dtype:
         raise ValueError(name) from exc
 
 
+def wide_point_width(receiver_width: int, budget_factor: int) -> int:
+    root = int(math.isqrt(budget_factor))
+    if root * root != budget_factor:
+        raise ValueError("budget_factor must be a perfect square")
+    return receiver_width * root
+
+
 def make_block(name: str, receiver_width: int, budget_factor: int) -> nn.Module:
+    if name == "wide_point":
+        return WidePointBudgetBlock(receiver_width, budget_factor)
     if name == "dense":
         return DenseBudgetBlock(receiver_width, budget_factor)
     if name == "fixed_sum":
@@ -126,6 +190,16 @@ def make_block(name: str, receiver_width: int, budget_factor: int) -> nn.Module:
     raise ValueError(f"unknown candidate: {name}")
 
 
+def boundary_width_for(
+    candidate: str,
+    receiver_width: int,
+    budget_factor: int,
+) -> int:
+    if candidate == "wide_point":
+        return wide_point_width(receiver_width, budget_factor)
+    return receiver_width
+
+
 def make_core(
     *,
     mode: str,
@@ -133,11 +207,12 @@ def make_core(
     receiver_width: int,
     budget_factor: int,
     depth: int,
-) -> tuple[nn.Module, nn.Module, int]:
-    """Return (core, representative_block, effective_depth)."""
+) -> tuple[nn.Module, nn.Module, int, int]:
+    """Return core, representative block, effective depth, actual boundary width."""
     first = make_block(candidate, receiver_width, budget_factor)
+    boundary_width = boundary_width_for(candidate, receiver_width, budget_factor)
     if mode == "micro":
-        return first, first, 1
+        return first, first, 1, boundary_width
     if mode != "stack":
         raise ValueError(f"unknown mode: {mode}")
 
@@ -148,10 +223,12 @@ def make_core(
             candidate, receiver_width, budget_factor
         )
         modules.append(block)
+        # Parameter-free scale control. Wide point pays LN over D; narrow
+        # candidates pay LN over R, which is part of the boundary-size story.
         modules.append(
-            nn.LayerNorm(receiver_width, elementwise_affine=False)
+            nn.LayerNorm(boundary_width, elementwise_affine=False)
         )
-    return nn.Sequential(*modules), representative, depth
+    return nn.Sequential(*modules), representative, depth, boundary_width
 
 
 def maybe_compile(module: nn.Module, args: argparse.Namespace) -> nn.Module:
@@ -188,25 +265,27 @@ def bench_one(
     *,
     mode: str,
     candidate: str,
+    receiver_width: int,
     batch: int,
     args: argparse.Namespace,
 ) -> BenchRow:
     dtype = dtype_from_name(args.dtype)
     seed_all(args.seed)
-    core, block, effective_depth = make_core(
+    core, block, effective_depth, boundary_width = make_core(
         mode=mode,
         candidate=candidate,
-        receiver_width=args.receiver_width,
+        receiver_width=receiver_width,
         budget_factor=args.budget_factor,
         depth=args.depth,
     )
+    total_params = sum(p.numel() for p in core.parameters())
     core = core.cuda().to(dtype=dtype)
     core.train(args.backward)
     core = maybe_compile(core, args)
 
     x = torch.randn(
         batch,
-        args.receiver_width,
+        boundary_width,
         device="cuda",
         dtype=dtype,
     ) * args.input_scale
@@ -234,7 +313,7 @@ def bench_one(
             core.zero_grad(set_to_none=True)
             x_train.grad = None
             y = core(x_train)
-            # Mean keeps the scalar loss scale independent of batch / R.
+            # Mean keeps scalar loss scale independent of batch / width.
             y.float().square().mean().backward()
 
         # Warm gradients / compiled backward before timing and peak reset.
@@ -249,26 +328,30 @@ def bench_one(
         peak_fb = active_peak_delta(forward_backward)
 
     block_params = block_parameter_count(block)
-    total_params = sum(p.numel() for p in core.parameters())
+    local_width = int(getattr(block, "local_width"))
+    reducer_weights = int(getattr(block, "reducer_weights", 0))
+    paper_wide_width = wide_point_width(receiver_width, args.budget_factor)
+
     row = BenchRow(
         mode=mode,
         candidate=candidate,
         batch=batch,
-        receiver_width=args.receiver_width,
+        reference_receiver_width=receiver_width,
+        input_width=boundary_width,
+        boundary_width=boundary_width,
+        boundary_ratio_vs_wide_point=boundary_width / paper_wide_width,
         budget_factor=args.budget_factor,
         depth=effective_depth,
         dtype=args.dtype,
         compiled=args.compile,
         block_params=block_params,
         total_params=total_params,
-        local_width=int(block.local_width),
-        reducer_weights=int(block.reducer_weights),
+        local_width=local_width,
+        reducer_weights=reducer_weights,
         learned_macs_per_sample_per_block=block_params,
-        logical_receiver_bytes_per_boundary=(
-            batch * args.receiver_width * element_bytes
-        ),
+        logical_boundary_bytes=batch * boundary_width * element_bytes,
         logical_local_bytes_if_materialized_per_block=(
-            batch * int(block.local_width) * element_bytes
+            batch * local_width * element_bytes
         ),
         forward_ms=fwd_ms,
         forward_backward_ms=fb_ms,
@@ -284,8 +367,8 @@ def bench_one(
 def print_rows(rows: list[BenchRow]) -> None:
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(
-        f"{'mode':<6} {'candidate':<15} {'B':>5} {'H':>6} {'redW':>9} "
-        f"{'fwd_ms':>9} {'fb_ms':>9} {'peakF_MB':>10} {'peakFB_MB':>10}"
+        f"{'mode':<6} {'candidate':<15} {'Rref':>5} {'B':>5} {'out':>6} "
+        f"{'H':>7} {'fwd_ms':>9} {'fb_ms':>9} {'peakF_MB':>10} {'peakFB_MB':>10}"
     )
     for r in rows:
         fb = "-" if r.forward_backward_ms is None else f"{r.forward_backward_ms:.4f}"
@@ -295,8 +378,9 @@ def print_rows(rows: list[BenchRow]) -> None:
             else f"{r.peak_forward_backward_active_bytes_delta / 2**20:.3f}"
         )
         print(
-            f"{r.mode:<6} {r.candidate:<15} {r.batch:>5} {r.local_width:>6} "
-            f"{r.reducer_weights:>9} {r.forward_ms:>9.4f} {fb:>9} "
+            f"{r.mode:<6} {r.candidate:<15} {r.reference_receiver_width:>5} "
+            f"{r.batch:>5} {r.boundary_width:>6} {r.local_width:>7} "
+            f"{r.forward_ms:>9.4f} {fb:>9} "
             f"{r.peak_forward_active_bytes_delta / 2**20:>10.3f} {peak_fb:>10}"
         )
 
@@ -306,14 +390,36 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--candidates",
         nargs="+",
-        default=["dense", "fixed_sum", "grouped2", "grouped4", "lowrank16"],
+        default=[
+            "wide_point",
+            "dense",
+            "fixed_sum",
+            "grouped2",
+            "grouped4",
+            "lowrank16",
+        ],
     )
-    p.add_argument("--modes", nargs="+", choices=["micro", "stack"], default=["micro", "stack"])
-    p.add_argument("--receiver-width", type=int, default=256)
+    p.add_argument(
+        "--modes",
+        nargs="+",
+        choices=["micro", "stack"],
+        default=["micro"],
+    )
+    p.add_argument(
+        "--receiver-widths",
+        type=int,
+        nargs="+",
+        default=[256, 512, 1024],
+        help="reference narrow R values; wide_point uses D=R*sqrt(K)",
+    )
     p.add_argument("--budget-factor", type=int, default=16)
     p.add_argument("--depth", type=int, default=8)
-    p.add_argument("--batches", type=int, nargs="+", default=[1, 8, 32, 128, 512])
-    p.add_argument("--dtype", choices=["float32", "float16", "bfloat16"], default="float32")
+    p.add_argument("--batches", type=int, nargs="+", default=[32, 128, 512])
+    p.add_argument(
+        "--dtype",
+        choices=["float32", "float16", "bfloat16"],
+        default="float32",
+    )
     p.add_argument("--input-scale", type=float, default=0.25)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--iters", type=int, default=100)
@@ -325,8 +431,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--quick", action="store_true")
     args = p.parse_args()
     if args.quick:
-        args.candidates = args.candidates[:3]
+        args.candidates = ["wide_point", "dense", "fixed_sum"]
         args.modes = ["micro"]
+        args.receiver_widths = [args.receiver_widths[0]]
         args.batches = [32]
         args.warmup = min(args.warmup, 3)
         args.iters = min(args.iters, 10)
@@ -340,16 +447,18 @@ def main() -> None:
 
     rows: list[BenchRow] = []
     for mode in args.modes:
-        for candidate in args.candidates:
-            for batch in args.batches:
-                rows.append(
-                    bench_one(
-                        mode=mode,
-                        candidate=candidate,
-                        batch=batch,
-                        args=args,
+        for receiver_width in args.receiver_widths:
+            for candidate in args.candidates:
+                for batch in args.batches:
+                    rows.append(
+                        bench_one(
+                            mode=mode,
+                            candidate=candidate,
+                            receiver_width=receiver_width,
+                            batch=batch,
+                            args=args,
+                        )
                     )
-                )
 
     if args.json:
         print(
@@ -364,7 +473,11 @@ def main() -> None:
         )
     else:
         print_rows(rows)
-        print("\nNOTE: allocation deltas are PyTorch active-memory peaks, not DRAM traffic.")
+        print(
+            "\nNOTE: active-allocation deltas are not DRAM traffic. "
+            "The size sweep is designed to expose cache/working-set crossovers; "
+            "confirm memory-access claims with hardware counters."
+        )
 
 
 if __name__ == "__main__":
