@@ -1,7 +1,7 @@
 # Gate 0 — first receipt
 
 **Date:** 2026-08-16  
-**Status:** narrow receiver idea survives; fixed branch reduction is not privileged by the first control.
+**Status:** narrow receiver idea survives; fixed branch reduction is not privileged; post-collapse mixing is a recorded null.
 
 This is a synthetic instrument check, not an external benchmark and not a hardware-efficiency result.
 
@@ -9,32 +9,28 @@ This is a synthetic instrument check, not an external benchmark and not a hardwa
 
 At approximately matched parameter count, can rich local nonlinear computation preserve held-out classification performance while reducing the width communicated between hidden blocks?
 
-The point model uses width `D=128`. Narrow models use receiver width `R` with the square hidden-core weight budget matched by
+The point model uses width `D=128`. Narrow models use receiver width `R` with square hidden-core weight budget
 
 ```text
 K * R^2 ~= D^2
 ```
 
-so:
+so `K=4 -> R=64` gives `0.50x` logical receiver width and `K=16 -> R=32` gives `0.25x`.
 
-```text
-K=4   -> R=64   -> 0.50x logical receiver traffic
-K=16  -> R=32   -> 0.25x logical receiver traffic
-```
-
-For the fixed input boundary, narrow models use `sqrt(K)` branch aggregation so the first-layer weight count is matched rather than accidentally over-allocated.
-
-Two narrow internal blocks are compared at exactly the same hidden weight budget and receiver width:
+Three narrow mechanisms are compared at the **same receiver width and same hidden weight count**:
 
 ```text
 BRANCH
-    Linear(R -> K*R) -> ReLU -> fixed branch mean -> R
+    many local ReLU features -> fixed group mean -> R
 
 BOTTLENECK CONTROL
-    Linear(R -> K*R/2) -> ReLU -> learned Linear(K*R/2 -> R)
+    fewer local ReLU features -> learned pre-collapse compression -> R
+
+POST-COLLAPSE MIXER NULL
+    local ReLU branches -> fixed mean -> R -> learned R x R mixer
 ```
 
-Both use `K*R^2` hidden weights. The bottleneck is the mandatory ordinary-MLP control: if it matches or beats the branch layer, the useful result is communication-bounded local compute, not something specifically dendritic.
+The third design is intentionally tempting: spend one branch-worth of budget on a small learned receiver mixer. But the mixer only sees the already-collapsed receiver, and in a feed-forward stack much of that extra linear map can be absorbed into the next layer. It is therefore a useful negative control for *where* learned compression must act.
 
 ## Setup
 
@@ -50,56 +46,53 @@ optimizer       AdamW
 seeds          0,1,2
 ```
 
-Labels come from a frozen random nonlinear teacher. Students do not see teacher weights.
-
-The run used the development container with `torch 2.10.0+cpu`; timing is only reference-PyTorch timing, not a GPU traffic measurement.
+Labels come from a frozen random nonlinear teacher. Students do not see teacher weights. Run environment: `torch 2.10.0+cpu`.
 
 ## Results
 
-| seed | point | branch K=4 | bottleneck K=4 | branch K=16 | bottleneck K=16 |
-|---:|---:|---:|---:|---:|---:|
-| 0 | 0.7983 | 0.7954 | 0.7720 | 0.7002 | 0.7739 |
-| 1 | 0.7402 | 0.7236 | 0.7134 | 0.6631 | 0.6973 |
-| 2 | 0.7495 | 0.7188 | 0.7271 | 0.6143 | 0.6992 |
-| **mean** | **0.7627** | **0.7459** | **0.7375** | **0.6592** | **0.7235** |
+| model | receiver ratio | params | mean accuracy |
+|---|---:|---:|---:|
+| point D=128 | 1.00x | 54,272 | **0.7627** |
+| branch K=4, R=64 | 0.50x | 53,760 | **0.7459** |
+| bottleneck K=4, R=64 | 0.50x | 53,760 | **0.7375** |
+| postmix K=4, R=64 | 0.50x | 53,760 | **0.7223** |
+| branch K=16, R=32 | 0.25x | 53,504 | **0.6592** |
+| bottleneck K=16, R=32 | 0.25x | 53,504 | **0.7235** |
+| postmix K=16, R=32 | 0.25x | 53,504 | **0.4129** |
 
-Parameter counts:
-
-```text
-point                 54,272
-branch K=4            53,760
-bottleneck K=4        53,760
-branch K=16           53,504
-bottleneck K=16       53,504
-```
-
-Hidden square-block weights are exactly `16,384` in all cases.
-
-Mean deltas versus point:
+Per-seed post-collapse mixer results:
 
 ```text
-branch K=4         -0.0167   at 0.50x receiver width
-bottleneck K=4     -0.0252   at 0.50x receiver width
-branch K=16        -0.1035   at 0.25x receiver width
-bottleneck K=16    -0.0392   at 0.25x receiver width
+K=4:   0.7739, 0.6904, 0.7026
+K=16:  0.5308, 0.2681, 0.4399
 ```
 
-## What changed after the control
+Hidden square-block weights are exactly `16,384` in every model.
 
-The first branch-only run made `K=16` look like evidence that 4x interface compression was simply too aggressive. The ordinary bottleneck control falsifies that interpretation.
+## What the controls changed
 
-At the same quarter-width receiver and the same hidden weight count, the learned bottleneck recovers much of the lost accuracy:
+### 1. Quarter-width is not intrinsically impossible
+
+The original branch-only result made `K=16` look like evidence that 4x interface compression was simply too aggressive. The ordinary bottleneck falsifies that interpretation:
 
 ```text
 branch K=16 mean       0.6592
 bottleneck K=16 mean   0.7235
 ```
 
-Therefore the first earned statement is **not** “dendritic branches enable quarter-width communication.” It is closer to:
+So a large amount of local computation can live behind a much narrower interface in this toy; **the compression operator matters**.
 
-> A large amount of local computation can live behind a substantially narrower interface, but the way local state is compressed matters. Fixed branch averaging becomes a serious bottleneck at high compression in this toy; an ordinary learned bottleneck is much more robust there.
+### 2. A mixer after collapse is too late / too redundant
 
-At `K=4`, branch reduction is slightly better than the bottleneck control on the three-seed mean, but the gap is small and synthetic. It is not evidence of a special dendritic advantage.
+The post-collapse mixer does not rescue the branch representation and becomes catastrophically poor at K=16. This should not be generalized to all mixers. The specific lesson is architectural:
+
+> If Y learns a receiver, the learned map must touch the rich local state **before** the irreversible narrow readout. Spending budget only after that readout cannot restore distinctions it discarded, and a plain linear post-map is largely redundant with the next layer anyway.
+
+This is exactly the distinction that the receiver-relative work in `Dig` makes operational: changing computation downstream of a fixed readout is not the same thing as changing the readout itself.
+
+### 3. No dendritic privilege has been earned
+
+At K=4 the fixed branch model is modestly ahead of the ordinary bottleneck on this synthetic three-seed mean. At K=16 the ordinary bottleneck is dramatically stronger. There is no basis here for claiming a special dendritic mechanism.
 
 ## Hardware note
 
@@ -109,15 +102,11 @@ The Wu et al. public implementation already contains a fused Triton branch-matmu
 
 ## Decision
 
-**Survives:** communication-bounded local computation is worth pursuing.  
-**Not earned:** fixed dendritic branch pooling as the privileged mechanism.  
-**Killed:** the idea that the branch K=16 failure proves quarter-width receivers are intrinsically too small.
+**Survives:** communication-bounded local computation.  
+**Not earned:** fixed dendritic pooling as the privileged mechanism.  
+**Killed:** “K=16 failed, therefore quarter-width is intrinsically too narrow.”  
+**Banked null:** post-collapse learned mixing as a good use of the same budget.
 
-Next gate:
+The next architecture gate should explore the **pre-collapse reducer frontier**: how much of a fixed parameter/compute budget should create local nonlinear features, and how much should be spent on a learned sparse/dense receiver that sees those features before they are discarded?
 
-1. move both branch and ordinary bottleneck controls to a standard external dataset;
-2. add an equal-traffic low-rank/bottleneck baseline before any receiver-routing story;
-3. profile an actually fused/local implementation on GPU;
-4. only then test whether a context-dependent receiver can beat one universal learned bottleneck at the same communicated width.
-
-Do not tune this synthetic teacher to manufacture a branch win.
+Mandatory endpoints are the fixed branch reducer and the ordinary dense bottleneck. Do not tune the synthetic teacher to manufacture a branch win.
