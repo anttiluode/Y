@@ -8,6 +8,8 @@ from y import (
     BranchReduceLinear,
     MixedBranchMLP,
     PointMLP,
+    PrecollapseReceiverBlock,
+    PrecollapseReceiverMLP,
     branch_square_weight_count,
     matched_receiver_width,
     receiver_traffic_ratio,
@@ -78,3 +80,45 @@ def test_postcollapse_mixer_matches_hidden_budget() -> None:
     branch = BranchMLP(input_dim=32, receiver_width=32, depth=4, branches=16, classes=8)
     mixed = MixedBranchMLP(input_dim=32, receiver_width=32, depth=4, branches=16, classes=8)
     assert nparams(branch) == nparams(mixed)
+
+
+def test_precollapse_zero_fanin_matches_branch_reduce() -> None:
+    branch = BranchReduceLinear(8, 8, branches=4, reduction="mean", bias=False)
+    pre = PrecollapseReceiverBlock(8, budget_factor=4, reducer_fanin=0)
+    with torch.no_grad():
+        pre.up.weight.copy_(branch.proj.weight)
+    x = torch.randn(6, 8)
+    assert torch.allclose(branch(x), pre(x), atol=1e-6)
+
+
+def test_precollapse_frontier_keeps_exact_hidden_budget() -> None:
+    receiver_width = 32
+    budget_factor = 16
+    target = budget_factor * receiver_width * receiver_width
+    for fanin in (0, 32, 64, 128, 256):
+        block = PrecollapseReceiverBlock(
+            receiver_width,
+            budget_factor,
+            reducer_fanin=fanin,
+            index_seed=7,
+        )
+        assert nparams(block) == target
+        assert block.hidden_weight_budget == target
+        assert block.learned_reducer_weights == receiver_width * fanin
+        assert block.correction_index.shape == (receiver_width, fanin)
+
+
+def test_precollapse_mlp_matches_branch_and_bottleneck_parameter_count() -> None:
+    branch = BranchMLP(input_dim=64, receiver_width=32, depth=4, branches=16, classes=10)
+    bneck = BottleneckMLP(input_dim=64, receiver_width=32, depth=4, branches=16, classes=10)
+    for fanin in (0, 32, 64, 128, 256):
+        pre = PrecollapseReceiverMLP(
+            input_dim=64,
+            receiver_width=32,
+            depth=4,
+            branches=16,
+            reducer_fanin=fanin,
+            classes=10,
+            index_seed=11,
+        )
+        assert nparams(pre) == nparams(branch) == nparams(bneck)
