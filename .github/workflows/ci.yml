@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .[dev,experiments]
+      - run: pytest -q
+      - run: python experiments/gate0_branch_reduce.py --quick
+      - run: python experiments/gate1_precollapse_frontier.py --quick
+      - run: python experiments/gate2_cost_locality.py --accuracy-only --quick
+      - run: python experiments/gate2_fairness_audit.py --quick
+      - run: python experiments/gate2_fairness_audit.py --normalize-hidden --quick
+      - run: python -m py_compile experiments/gate2_hardware_shortlist.py
