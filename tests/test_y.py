@@ -6,6 +6,7 @@ from y import (
     BottleneckMLP,
     BranchMLP,
     BranchReduceLinear,
+    MixedBranchMLP,
     PointMLP,
     branch_square_weight_count,
     matched_receiver_width,
@@ -71,3 +72,9 @@ def test_bottleneck_control_matches_branch_budget() -> None:
     bneck = BottleneckMLP(input_dim=32, receiver_width=64, depth=4, branches=4, classes=8)
     assert nparams(branch) == nparams(bneck)
     assert bneck.local_width == 128
+
+
+def test_postcollapse_mixer_matches_hidden_budget() -> None:
+    branch = BranchMLP(input_dim=32, receiver_width=32, depth=4, branches=16, classes=8)
+    mixed = MixedBranchMLP(input_dim=32, receiver_width=32, depth=4, branches=16, classes=8)
+    assert nparams(branch) == nparams(mixed)
