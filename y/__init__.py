@@ -8,12 +8,14 @@ from .accounting import (
     square_weight_count,
 )
 from .layers import BranchReduceLinear
-from .models import BranchMLP, PointMLP
+from .models import BottleneckMLP, BranchMLP, NarrowBottleneckBlock, PointMLP
 
 __all__ = [
     "BoundaryTraffic",
     "BranchReduceLinear",
     "BranchMLP",
+    "BottleneckMLP",
+    "NarrowBottleneckBlock",
     "PointMLP",
     "branch_square_weight_count",
     "matched_receiver_width",
