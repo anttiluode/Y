@@ -1,14 +1,17 @@
 """Gate 2 fairness audit before promoting any structured receiver.
 
 The first 5-epoch smoke run showed grouped2 > dense on one Digits split. Before
-spending a full multi-seed run on that bump, audit two implementation details:
+spending a full multi-seed run on that bump, audit implementation details that
+can masquerade as architecture:
 
-1. low-rank reduction now uses variance-matched factor initialization;
+1. low-rank reduction uses variance-matched factor initialization;
 2. Wu et al.'s fixed dendritic endpoint sums branches, whereas historical Y
    gates used their mean. Mean/sqrt-sum/sum have identical connectivity and
-   parameters, so differences diagnose optimization scale rather than capacity.
+   parameters, so differences diagnose optimization scale rather than capacity;
+3. an optional parameter-free LayerNorm after every hidden receiver removes
+   positive constant rescaling, giving a scale-controlled capacity audit.
 
-This file is intentionally small and reuses Gate-2's paired training protocol.
+This file intentionally reuses Gate-2's paired training protocol.
 """
 
 from __future__ import annotations
@@ -18,12 +21,20 @@ import statistics
 
 import torch
 from scipy.stats import ttest_rel
+from torch import nn
 
 from gate2_cost_locality import digits_split, seed_all, train_model
 from y.efficient import make_control_mlp
 
 
-def make_model(name: str, *, receiver_width: int, depth: int, budget_factor: int):
+def make_model(
+    name: str,
+    *,
+    receiver_width: int,
+    depth: int,
+    budget_factor: int,
+    normalize_hidden: bool,
+):
     common = dict(
         input_dim=64,
         receiver_width=receiver_width,
@@ -32,15 +43,31 @@ def make_model(name: str, *, receiver_width: int, depth: int, budget_factor: int
         classes=10,
     )
     if name == "dense":
-        return make_control_mlp("dense", **common)
-    if name.startswith("grouped"):
-        return make_control_mlp("grouped", groups=int(name[7:]), **common)
-    if name.startswith("lowrank"):
-        return make_control_mlp("lowrank", rank=int(name[7:]), **common)
-    if name.startswith("fixed_"):
+        model = make_control_mlp("dense", **common)
+    elif name.startswith("grouped"):
+        model = make_control_mlp("grouped", groups=int(name[7:]), **common)
+    elif name.startswith("lowrank"):
+        model = make_control_mlp("lowrank", rank=int(name[7:]), **common)
+    elif name.startswith("fixed_"):
         reduction = name.removeprefix("fixed_")
-        return make_control_mlp("fixed", fixed_reduction=reduction, **common)
-    raise ValueError(name)
+        model = make_control_mlp("fixed", fixed_reduction=reduction, **common)
+    else:
+        raise ValueError(name)
+
+    if normalize_hidden:
+        # No learned affine parameters: this is a scale-control instrument,
+        # not extra representational budget. Positive rescaling before LN is
+        # cancelled (up to epsilon), so mean vs sum should cease to matter.
+        model.blocks = nn.Sequential(
+            *(
+                nn.Sequential(
+                    block,
+                    nn.LayerNorm(receiver_width, elementwise_affine=False),
+                )
+                for block in model.blocks
+            )
+        )
+    return model
 
 
 def run(args):
@@ -57,6 +84,7 @@ def run(args):
         "fixed_sum",
     ]
     rows: dict[str, list[float]] = {name: [] for name in names}
+    print(f"normalize_hidden={args.normalize_hidden}")
 
     for split_seed in args.seeds:
         xtr, ytr, xte, yte = digits_split(split_seed)
@@ -67,6 +95,7 @@ def run(args):
                 receiver_width=args.receiver_width,
                 depth=args.depth,
                 budget_factor=args.budget_factor,
+                normalize_hidden=args.normalize_hidden,
             )
             acc, sec = train_model(
                 model,
@@ -117,6 +146,7 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=15)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=2e-3)
+    p.add_argument("--normalize-hidden", action="store_true")
     p.add_argument("--quick", action="store_true")
     args = p.parse_args()
     if args.quick:
