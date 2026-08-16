@@ -1,10 +1,8 @@
 """Gate 0: can local branch compute buy a narrower communicated interface?
 
 This is a replication-oriented engineering gate, not a novelty experiment.
-It compares a point MLP against branch-reduce MLPs whose square hidden blocks
-have approximately the same number of weights:
-
-    D_point^2 ~= K * D_receiver^2.
+It compares a point MLP against branch-reduce MLPs and ordinary learned
+bottleneck controls at the same narrow receiver width and hidden weight budget.
 
 The communication metric is a logical activation-width proxy, not measured
 DRAM traffic. Real hardware claims require a fused kernel + profiler gate.
@@ -23,7 +21,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from y import BranchMLP, PointMLP, matched_receiver_width
+from y import BottleneckMLP, BranchMLP, PointMLP, matched_receiver_width
 
 
 @dataclass
@@ -144,10 +142,11 @@ def run(args: argparse.Namespace) -> list[Result]:
 
     for k in args.branches:
         width = matched_receiver_width(args.point_width, k)
+        receiver_values = width * args.depth
+
         seed_all(args.seed)
         model = BranchMLP(args.input_dim, width, args.depth, k, args.classes)
         acc, sec = train_model(model, train_loader, test_loader, device, args.epochs, args.lr)
-        receiver_values = width * args.depth
         results.append(
             Result(
                 model=f"branch_k{k}",
@@ -159,6 +158,28 @@ def run(args: argparse.Namespace) -> list[Result]:
                 receiver_ratio_vs_point=receiver_values / point_receiver_values,
                 test_accuracy=acc,
                 train_seconds=sec,
+            )
+        )
+
+        # Mandatory ordinary-MLP control: same receiver width and same hidden
+        # matrix-weight budget, but a learned up/down bottleneck rather than
+        # fixed grouping/reduction across branches.
+        seed_all(args.seed)
+        bottleneck = BottleneckMLP(args.input_dim, width, args.depth, k, args.classes)
+        b_acc, b_sec = train_model(
+            bottleneck, train_loader, test_loader, device, args.epochs, args.lr
+        )
+        results.append(
+            Result(
+                model=f"bneck_k{k}",
+                branches=k,
+                receiver_width=width,
+                params=count_params(bottleneck),
+                hidden_core_weights_per_block=k * width * width,
+                receiver_values_per_sample=receiver_values,
+                receiver_ratio_vs_point=receiver_values / point_receiver_values,
+                test_accuracy=b_acc,
+                train_seconds=b_sec,
             )
         )
     return results
