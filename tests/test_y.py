@@ -3,6 +3,7 @@ from torch import nn
 
 from y import (
     BoundaryTraffic,
+    BottleneckMLP,
     BranchMLP,
     BranchReduceLinear,
     PointMLP,
@@ -63,3 +64,10 @@ def test_complexity_matching_is_close_for_gate0_shapes() -> None:
     assert nparams(k16) / nparams(point) > 0.98
     assert k4.input_branches == 2
     assert k16.input_branches == 4
+
+
+def test_bottleneck_control_matches_branch_budget() -> None:
+    branch = BranchMLP(input_dim=32, receiver_width=64, depth=4, branches=4, classes=8)
+    bneck = BottleneckMLP(input_dim=32, receiver_width=64, depth=4, branches=4, classes=8)
+    assert nparams(branch) == nparams(bneck)
+    assert bneck.local_width == 128
