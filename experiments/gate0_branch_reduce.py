@@ -1,8 +1,8 @@
-"""Gate 0: can local branch compute buy a narrower communicated interface?
+"""Gate 0: can rich local compute buy a narrower communicated interface?
 
-This is a replication-oriented engineering gate, not a novelty experiment.
-It compares a point MLP against branch-reduce MLPs and ordinary learned
-bottleneck controls at the same narrow receiver width and hidden weight budget.
+Compares three narrow mechanisms at matched receiver width and hidden weight
+budget: fixed branch reduction, an ordinary learned bottleneck, and a tempting
+post-collapse mixer negative control.
 
 The communication metric is a logical activation-width proxy, not measured
 DRAM traffic. Real hardware claims require a fused kernel + profiler gate.
@@ -21,7 +21,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from y import BottleneckMLP, BranchMLP, PointMLP, matched_receiver_width
+from y import BottleneckMLP, BranchMLP, MixedBranchMLP, PointMLP, matched_receiver_width
 
 
 @dataclass
@@ -43,14 +43,7 @@ def seed_all(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def make_teacher_data(
-    n_train: int,
-    n_test: int,
-    input_dim: int,
-    classes: int,
-    seed: int,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Create a fixed nonlinear held-out classification problem."""
+def make_teacher_data(n_train: int, n_test: int, input_dim: int, classes: int, seed: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     g = torch.Generator().manual_seed(seed + 101)
     total = n_train + n_test
     x = torch.randn(total, input_dim, generator=g)
@@ -80,14 +73,7 @@ def accuracy(model: nn.Module, loader: DataLoader, device: torch.device) -> floa
     return right / max(1, total)
 
 
-def train_model(
-    model: nn.Module,
-    train_loader: DataLoader,
-    test_loader: DataLoader,
-    device: torch.device,
-    epochs: int,
-    lr: float,
-) -> tuple[float, float]:
+def train_model(model: nn.Module, train_loader: DataLoader, test_loader: DataLoader, device: torch.device, epochs: int, lr: float) -> tuple[float, float]:
     model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = nn.CrossEntropyLoss()
@@ -100,103 +86,61 @@ def train_model(
             loss = loss_fn(model(x), y)
             loss.backward()
             opt.step()
-    elapsed = time.perf_counter() - start
-    return accuracy(model, test_loader, device), elapsed
+    return accuracy(model, test_loader, device), time.perf_counter() - start
+
+
+def append_result(results, model_name, k, width, model, acc, sec, point_receiver_values, depth):
+    receiver_values = width * depth
+    results.append(Result(
+        model=model_name,
+        branches=k,
+        receiver_width=width,
+        params=count_params(model),
+        hidden_core_weights_per_block=k * width * width,
+        receiver_values_per_sample=receiver_values,
+        receiver_ratio_vs_point=receiver_values / point_receiver_values,
+        test_accuracy=acc,
+        train_seconds=sec,
+    ))
 
 
 def run(args: argparse.Namespace) -> list[Result]:
     seed_all(args.seed)
     device = torch.device(args.device)
-    xtr, ytr, xte, yte = make_teacher_data(
-        args.train_samples,
-        args.test_samples,
-        args.input_dim,
-        args.classes,
-        args.seed,
-    )
-    train_loader = DataLoader(
-        TensorDataset(xtr, ytr), batch_size=args.batch_size, shuffle=True
-    )
-    test_loader = DataLoader(
-        TensorDataset(xte, yte), batch_size=args.batch_size, shuffle=False
-    )
+    xtr, ytr, xte, yte = make_teacher_data(args.train_samples, args.test_samples, args.input_dim, args.classes, args.seed)
+    train_loader = DataLoader(TensorDataset(xtr, ytr), batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(TensorDataset(xte, yte), batch_size=args.batch_size, shuffle=False)
 
     results: list[Result] = []
     point = PointMLP(args.input_dim, args.point_width, args.depth, args.classes)
     acc, sec = train_model(point, train_loader, test_loader, device, args.epochs, args.lr)
-    point_core = args.point_width * args.point_width
     point_receiver_values = args.point_width * args.depth
-    results.append(
-        Result(
-            model="point",
-            branches=1,
-            receiver_width=args.point_width,
-            params=count_params(point),
-            hidden_core_weights_per_block=point_core,
-            receiver_values_per_sample=point_receiver_values,
-            receiver_ratio_vs_point=1.0,
-            test_accuracy=acc,
-            train_seconds=sec,
-        )
-    )
+    results.append(Result(
+        model="point", branches=1, receiver_width=args.point_width,
+        params=count_params(point), hidden_core_weights_per_block=args.point_width**2,
+        receiver_values_per_sample=point_receiver_values, receiver_ratio_vs_point=1.0,
+        test_accuracy=acc, train_seconds=sec,
+    ))
 
+    variants = (
+        ("branch", BranchMLP),
+        ("bneck", BottleneckMLP),
+        ("postmix", MixedBranchMLP),
+    )
     for k in args.branches:
         width = matched_receiver_width(args.point_width, k)
-        receiver_values = width * args.depth
-
-        seed_all(args.seed)
-        model = BranchMLP(args.input_dim, width, args.depth, k, args.classes)
-        acc, sec = train_model(model, train_loader, test_loader, device, args.epochs, args.lr)
-        results.append(
-            Result(
-                model=f"branch_k{k}",
-                branches=k,
-                receiver_width=width,
-                params=count_params(model),
-                hidden_core_weights_per_block=k * width * width,
-                receiver_values_per_sample=receiver_values,
-                receiver_ratio_vs_point=receiver_values / point_receiver_values,
-                test_accuracy=acc,
-                train_seconds=sec,
-            )
-        )
-
-        # Mandatory ordinary-MLP control: same receiver width and same hidden
-        # matrix-weight budget, but a learned up/down bottleneck rather than
-        # fixed grouping/reduction across branches.
-        seed_all(args.seed)
-        bottleneck = BottleneckMLP(args.input_dim, width, args.depth, k, args.classes)
-        b_acc, b_sec = train_model(
-            bottleneck, train_loader, test_loader, device, args.epochs, args.lr
-        )
-        results.append(
-            Result(
-                model=f"bneck_k{k}",
-                branches=k,
-                receiver_width=width,
-                params=count_params(bottleneck),
-                hidden_core_weights_per_block=k * width * width,
-                receiver_values_per_sample=receiver_values,
-                receiver_ratio_vs_point=receiver_values / point_receiver_values,
-                test_accuracy=b_acc,
-                train_seconds=b_sec,
-            )
-        )
+        for name, cls in variants:
+            seed_all(args.seed)
+            model = cls(args.input_dim, width, args.depth, k, args.classes)
+            acc, sec = train_model(model, train_loader, test_loader, device, args.epochs, args.lr)
+            append_result(results, f"{name}_k{k}", k, width, model, acc, sec, point_receiver_values, args.depth)
     return results
 
 
 def print_table(results: list[Result]) -> None:
-    print(
-        f"{'model':<12} {'K':>3} {'recv':>6} {'params':>10} "
-        f"{'core_w':>10} {'traffic':>8} {'acc':>8} {'train_s':>9}"
-    )
+    print(f"{'model':<12} {'K':>3} {'recv':>6} {'params':>10} {'core_w':>10} {'traffic':>8} {'acc':>8} {'train_s':>9}")
     for r in results:
-        print(
-            f"{r.model:<12} {r.branches:>3} {r.receiver_width:>6} "
-            f"{r.params:>10} {r.hidden_core_weights_per_block:>10} "
-            f"{r.receiver_ratio_vs_point:>8.3f} {r.test_accuracy:>8.4f} "
-            f"{r.train_seconds:>9.2f}"
-        )
+        print(f"{r.model:<12} {r.branches:>3} {r.receiver_width:>6} {r.params:>10} {r.hidden_core_weights_per_block:>10} {r.receiver_ratio_vs_point:>8.3f} {r.test_accuracy:>8.4f} {r.train_seconds:>9.2f}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -226,7 +170,4 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     rows = run(args)
-    if args.json:
-        print(json.dumps([asdict(r) for r in rows], indent=2))
-    else:
-        print_table(rows)
+    print(json.dumps([asdict(r) for r in rows], indent=2) if args.json else "") if args.json else print_table(rows)
