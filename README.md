@@ -12,22 +12,21 @@ Y starts **after** that result.
 
 ## The object
 
-A reference Y block is intentionally simple:
+The first reference block is deliberately simple:
 
 ```text
 narrow receiver x
        |
        v
-  local branch compute
-  b1  b2  ...  bK
-   \   |      /
-    nonlinear
+   rich local compute
        |
-  local reduction
+ local compression
        |
        v
 narrow receiver y
 ```
+
+The paper's branch-reduce construction is one candidate local compressor, not an axiom. Y immediately compares it against an ordinary learned bottleneck at the same receiver width and hidden weight budget.
 
 For a square point layer of width `D`, there are roughly `D^2` weights. A K-branch square block with receiver width `R` has roughly `K R^2` weights. Matching hidden-core weight complexity gives
 
@@ -35,7 +34,7 @@ For a square point layer of width `D`, there are roughly `D^2` weights. A K-bran
 R ~= D / sqrt(K)
 ```
 
-so `K=4` suggests a half-width receiver and `K=16` a quarter-width receiver while preserving the square hidden-core weight count.
+so `K=4` suggests a half-width receiver and `K=16` a quarter-width receiver while preserving square hidden-core weight count.
 
 That is the first sanity check, not the final architecture.
 
@@ -51,27 +50,39 @@ Y asks whether those ideas can become an efficiency primitive:
 
 Dynamic width, routing, task-aware compression and MoE already occupy much of this territory. Y therefore uses kill gates and strong controls rather than treating the framing as novelty.
 
-## Gate 0 — fixed branch reduction
-
-The repo begins with a transparent PyTorch implementation and a synthetic held-out classification gate:
+## Gate 0 — fixed local aggregation
 
 ```bash
 pip install -e .
 python experiments/gate0_branch_reduce.py --quick
 ```
 
-It compares:
+The first gate compares:
 
 ```text
 point width D
 vs
-K=4  receiver ~ D/2
-K=16 receiver ~ D/4
+branch K=4 / K=16
+vs
+ordinary learned bottleneck at exactly the same narrow receiver width
+and the same hidden weight budget
 ```
 
-while keeping the weight count of square hidden blocks approximately matched.
+The first three-seed synthetic result is already useful:
 
-The output reports accuracy, exact parameter count, hidden-core weights, and a **logical receiver-traffic proxy**. This proxy is not measured DRAM traffic. Hardware claims require a later fused-kernel profiler gate.
+```text
+mean held-out accuracy
+
+point D=128             0.7627   receiver 1.00x
+branch K=4, R=64        0.7459   receiver 0.50x
+bottleneck K=4, R=64    0.7375   receiver 0.50x
+branch K=16, R=32       0.6592   receiver 0.25x
+bottleneck K=16, R=32   0.7235   receiver 0.25x
+```
+
+The important correction is the last pair: the poor `K=16` branch result does **not** mean a quarter-width receiver is inherently too small. An ordinary learned bottleneck at the same width and parameter count recovers much of the loss. So the first thing surviving is **communication-bounded local computation**, not fixed dendritic branch averaging as a privileged mechanism.
+
+The output also reports exact parameter count and a **logical receiver-traffic proxy**. This proxy is not measured DRAM traffic. Hardware claims require a later fused-kernel profiler gate.
 
 Run tests:
 
@@ -81,14 +92,14 @@ pytest -q
 
 ## Roadmap
 
-1. **H0 fixed aggregation** — reproduce the accuracy/receiver-width tradeoff locally.
+1. **H0 fixed aggregation** — move branch and ordinary bottleneck controls to a standard external dataset.
 2. **H1 receiver bank** — same transmitted width, different local readout chosen by context; compare against ordinary bottlenecks and dynamic-width networks.
 3. **H2 escalate when blind** — pay for an additional receiver only when the current one has a measured task-relevant discrimination failure.
 4. **H3 structural consolidation** — only if H2 survives: repeated useful routes can become persistent in continual learning.
 5. **hardware gate** — fused implementation + profiler counters. No speed/energy claim before this.
 
-See [`docs/FOUNDING.md`](docs/FOUNDING.md) for prior-art boundaries and stop conditions and [`docs/GATE0_FIRST_RECEIPT.md`](docs/GATE0_FIRST_RECEIPT.md) for the first three-seed result.
+See [`docs/FOUNDING.md`](docs/FOUNDING.md) for prior-art boundaries and stop conditions and [`docs/GATE0_FIRST_RECEIPT.md`](docs/GATE0_FIRST_RECEIPT.md) for the first result and its control-driven correction.
 
 ## Current status
 
-**Pre-result / first gate partially survived.** The first code is an instrument for trying to kill the idea cheaply. On the initial synthetic gate, `K=4` kept roughly matched parameter count and half the logical hidden receiver width for a small accuracy loss; `K=16` lost too much. No hardware-efficiency claim has been earned.
+**First gate partially survived, mechanism demoted.** Narrow interfaces with rich local compute are worth carrying forward. Fixed branch averaging is not yet special, and at high compression the ordinary learned bottleneck is clearly stronger in the first toy. No hardware-efficiency claim has been earned.
