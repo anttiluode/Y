@@ -19,3 +19,4 @@ jobs:
       - run: python experiments/gate0_branch_reduce.py --quick
       - run: python experiments/gate1_precollapse_frontier.py --quick
       - run: python experiments/gate2_cost_locality.py --accuracy-only --quick
+      - run: python experiments/gate2_fairness_audit.py --quick
