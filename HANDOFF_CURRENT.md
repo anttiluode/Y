@@ -1,185 +1,226 @@
 # Y — CURRENT HANDOFF
 
 **Updated:** 2026-08-16  
-**Status:** Gate 0 corrected; Gate 1 completed; first candidate Y block failed.
+**Status:** Gate 0/1 interpretation corrected; Gate 2 accuracy/fairness audit completed; hardware/locality gate open.
 
 ## Read first
 
-1. `docs/GATE1_PRECOLLAPSE_FRONTIER_RECEIPT.md` — current endpoint: no interior pre-collapse receiver winner on Digits.
-2. `docs/GATE0_FIRST_RECEIPT.md` — corrected synthetic gate and minibatch-pairing methodological repair.
-3. `README.md` — project boundary and next gate.
-4. `experiments/gate1_precollapse_frontier.py` — reproducible external frontier instrument.
-5. `y/models.py` — exact-budget reference blocks.
+1. `docs/GATE2_FAIRNESS_RECEIPT.md` — **current scientific endpoint**: the old fixed-mean null was scale-confounded; after scale control dense/grouped/fixed receivers occupy the same small-task accuracy band.
+2. `docs/GATE2_COST_LOCALITY_PROTOCOL.md` — systems gate and stop conditions.
+3. `docs/GATE1_PRECOLLAPSE_FRONTIER_RECEIPT.md` — historical sparse-correction frontier; retain, but read with the correction below.
+4. `docs/GATE0_FIRST_RECEIPT.md` — corrected minibatch-paired synthetic gate; fixed-mean capacity interpretation is superseded.
+5. `experiments/gate2_fairness_audit.py` — scale/initialization audit.
+6. `experiments/gate2_cost_locality.py` — accuracy + CUDA reference harness.
+7. `y/efficient.py` — Gate-2 dense, grouped, low-rank, and fixed receiver controls.
 
 ---
 
 ## One-line state
 
-> **Narrow communicated interfaces remain plausible, but fixed dendritic pooling loses to an ordinary learned bottleneck, and moving learned reducer budget below 50% did not preserve dense-bottleneck accuracy on the first external dataset. No Y block has been found.**
+> **Y has not found a special learned receiver. More importantly, it discovered that the earlier fixed-branch failure was mostly an optimization-scale artifact: once receiver scale is controlled, fixed local nonlinear aggregation can match the ordinary dense bottleneck on Digits. The open question is now the one the project should have been asking all along — whether that local aggregation actually reduces hardware communication/memory cost.**
 
 ---
 
-## Gate 0 correction
+# Critical correction to Gate 0 / Gate 1
 
-The original three-seed experiment was not strictly paired because differently shaped models consumed different amounts of global RNG before one shared shuffled DataLoader sampled minibatches.
-
-Rule now frozen:
+Historical Y branch blocks used:
 
 ```text
-same dataset / split
-same model seed
-fresh DataLoader per architecture
-explicit identical shuffle-generator seed
+receiver = mean_k ReLU(branch_k)
 ```
 
-Corrected ten-seed synthetic K=16 / R=32 means:
+The motivating Wu-style formal block uses a **sum** over nonlinear branch outputs.
+
+For fixed K,
 
 ```text
-branch        0.65015
-bottleneck    0.71748
-postmix       0.46309
+sum = K * mean
 ```
 
-Survivors:
+so these have the same connectivity and representational family. In an
+unnormalized deep MLP, however, that constant scale strongly changes training.
+
+Gate 2 measured the effect directly.
+
+Three paired Digits splits, 15 epochs, R=32, K=16:
 
 ```text
-quarter-width receiver is not intrinsically impossible
-pre-collapse learned compression matters
-post-collapse linear mixing is a bad use of this budget
-fixed branch averaging is not privileged
+UNNORMALIZED
+
+dense             0.921605 +/- 0.036774
+grouped2          0.943827 +/- 0.007484
+grouped4          0.922222 +/- 0.015822
+lowrank4          0.910494 +/- 0.031878
+lowrank8          0.924691 +/- 0.009321
+lowrank16         0.935802 +/- 0.010851
+fixed_mean        0.409877 +/- 0.292624
+fixed_sqrt_sum    0.922222 +/- 0.005556
+fixed_sum         0.961728 +/- 0.005953
 ```
 
-Do not use the old K=4 three-seed difference as paired evidence.
+The same fixed architecture went from catastrophic to strong when only its
+constant aggregation scale changed. Therefore the old sentence
+
+```text
+fixed dendritic pooling loses to an ordinary learned bottleneck
+```
+
+is **withdrawn as a capacity conclusion**.
+
+A precise historical statement is still allowed:
+
+```text
+fixed-mean aggregation optimized badly in the old unnormalized Gate 0/1 setup
+```
 
 ---
 
-## Gate 1 object
+# Scale-controlled capacity audit
 
-At receiver width `R`, budget factor `K`, and learned reducer fan-in `s`:
+Gate 2 then inserted a parameter-free
+`LayerNorm(R, elementwise_affine=False)` after each hidden receiver. This adds
+no learned parameters and largely removes positive constant receiver scale as a
+confound.
 
-```text
-H = K*R - s
-
-feature weights   = R*H
-reducer weights   = R*s
---------------------------------
-total             = K*R^2 exactly
-```
-
-`PrecollapseReceiverBlock` gives every local feature a free grouped-mean path and adds a zero-initialized learned sparse correction that touches the local state before collapse.
-
-For `D=128`, `K=16`, `R=32`:
+Three paired Digits splits, 15 epochs:
 
 ```text
-s=0      reducer 0%       H=512
-s=32     reducer 6.25%    H=480
-s=64     reducer 12.5%    H=448
-s=128    reducer 25%      H=384
-s=256    reducer 50%      H=256
+dense             0.961111 +/- 0.009799
+grouped2          0.962963 +/- 0.022453
+grouped4          0.973457 +/- 0.008553
+lowrank4          0.947531 +/- 0.011906
+lowrank8          0.954321 +/- 0.012330
+lowrank16         0.953086 +/- 0.019275
+fixed_mean        0.969753 +/- 0.014384
+fixed_sqrt_sum    0.974074 +/- 0.009259
+fixed_sum         0.973457 +/- 0.009135
 ```
 
-The ordinary bottleneck is a separate 50/50 endpoint/control with `H=256`.
+Paired differences versus dense were not significant in this n=3 audit.
+Among the three identical-connectivity fixed variants, normalization collapsed
+the scale gap:
+
+```text
+fixed_sqrt_sum vs mean   +0.004321   p=0.779848
+fixed_sum      vs mean   +0.003704   p=0.800000
+```
+
+Current capacity verdict:
+
+```text
+special learned reducer required       NO
+fixed local aggregation capacity null  NO — old null was confounded
+interior grouped winner established    NO
+dense bottleneck uniquely superior     NO
+```
+
+This small-task result is compatible with the motivating paper's core framing:
+local nonlinear aggregation need not be a capacity trick. Its interesting
+engineering value would have to come from locality / communication.
 
 ---
 
-## Gate 1 result — scikit-learn Digits
+# Gate 1 is retained, but narrowed
 
-Ten paired stratified train/test splits, 40 epochs:
-
-```text
-point D=128          0.97630
-bottleneck R=32      0.96241
-pre s=256            0.96056
-pre s=128            0.94426
-pre s=64             0.93074
-pre s=32             0.92704
-branch                0.57333
-```
-
-Paired versus bottleneck:
+Gate 1's exact object was:
 
 ```text
-s=32      -0.03537   p=0.00336
-s=64      -0.03167   p=0.00225
-s=128     -0.01815   p=0.00475
-s=256     -0.00185   p=0.628
+wide local ReLU state
+-> fixed grouped-MEAN base receiver
+-> zero-initialized sparse learned correction
 ```
 
-Verdict:
+The correction weights were deliberately initialized to zero. The dense
+bottleneck reducer was normally/randomly initialized.
 
-```text
-interior sparse receiver beats endpoints      NO
-cheap learned receiver matches bottleneck     NO on Digits
-50% residual receiver beats bottleneck        NO / tie
-```
+Therefore Gate 1 cleanly tested:
 
-The synthetic corrected ten-seed result had `pre s=32 ~= bottleneck`; that apparent sufficiency did not transfer externally. Preserve this as a warning against tuning synthetic teachers.
+> **Can a cheap sparse learned correction grow out of the historical fixed-mean receiver and match the dense bottleneck?**
+
+On ten paired Digits splits the answer was no below the 50% reducer-budget end.
+That result remains banked.
+
+It did **not** cleanly establish:
+
+> every sparse/local learned reducer is intrinsically worse than dense reduction
+
+Do not overgeneralize the receipt.
 
 ---
 
-## Important implementation boundary
+# NEXT GATE — actual hardware locality
 
-The exact sparse reference stores only active correction weights plus fixed integer indices, but its gather implementation is **not** a hardware-efficiency result.
+Do **not** return to routing, growth, WidePresent, receiver banks, or another
+neuron activation yet.
 
-Do not conflate:
+The next question is:
+
+> **At matched receiver width and explicit learned budget, can fixed/local or
+> structured reduction reduce measured hardware cost without giving back the
+> capacity that the normalized audit preserved?**
+
+Shortlist:
+
+```text
+dense bottleneck        ordinary control
+fixed local aggregation paper-form/topology control
+grouped2                mild learned-local reducer
+grouped4                stronger learned-local reducer
+lowrank16               standard factorized control
+```
+
+Keep these quantities separate:
 
 ```text
 logical receiver width
 parameter count
-FLOP count
-activation materialization
-DRAM traffic
-cache behavior
-kernel launch / occupancy
-wall-clock
+FLOPs
+wide local activation width
+whether that activation is materialized
+PyTorch allocated memory
+kernel count / launch overhead
+wall-clock latency
+physical DRAM traffic
 energy
 ```
 
-These are now separate measurements.
+A reference eager PyTorch block can have a narrow public interface while still
+materializing the entire wide local state in global memory. That does **not**
+earn a communication claim.
+
+Run the existing reference CUDA gate locally with:
+
+```bash
+python experiments/gate2_cost_locality.py --hardware-only --bench-backward
+python experiments/gate2_cost_locality.py --hardware-only --bench-backward --bench-dtype float16
+python experiments/gate2_cost_locality.py --hardware-only --compile
+```
+
+The existing harness still includes a historical fixed-mean name in parts of
+its sweep; use `experiments/gate2_fairness_audit.py` for scale science. The
+next code task is to freeze a **hardware shortlist** whose fixed candidate uses
+paper-form/local-sum topology explicitly and whose timing cannot overflow from
+chaining raw sums through many blocks.
+
+Physical DRAM-byte claims require hardware counters / an appropriate profiler;
+peak allocation alone is insufficient.
 
 ---
 
-# NEXT GATE: cost/locality before routing
-
-Do **not** add:
+## Stop conditions
 
 ```text
-receiver bank
-WAIT/ROUTE controller
-structural growth
-WidePresent state
-more biological nonlinearities
+If eager/compiled dense is cheaper and no local implementation closes gap:
+    no Y efficiency block yet.
+
+If low rank spans the best accuracy/cost frontier:
+    established method explains the win; do not claim Y novelty.
+
+If grouped/fixed local topology preserves accuracy but PyTorch materialization kills cost:
+    the next valid task is a fused/local kernel replication, not routing.
+
+If a fused/local implementation gives a robust wall-clock/memory advantage:
+    replicate on a second workload before reopening context-dependent receivers.
 ```
 
-just to rescue Gate 1.
-
-The next question is ordinary and hardware-facing:
-
-> **If a richly learned pre-collapse reducer is required anyway, can we make that reducer materially cheaper in communication/locality while preserving the ordinary dense bottleneck's accuracy?**
-
-Mandatory controls:
-
-```text
-dense bottleneck
-low-rank factorized linear
-block/grouped linear
-structured sparse linear
-fused local branch/reduction where fair
-```
-
-Measure on actual GPU:
-
-```text
-accuracy
-receiver width
-learned weights / FLOPs
-wall-clock inference + training
-peak allocated memory
-profiler memory/kernel behavior where available
-```
-
-Only if one structured/local design lies on a better measured cost/accuracy frontier than the ordinary dense bottleneck should Y return to context-dependent receiver selection.
-
-## Stop condition
-
-If standard low-rank/grouped/sparse controls span the same or better frontier, then Y's current contribution collapses to a useful framing and negative-results archive. Accept that result rather than inventing another mechanism.
+No hardware-efficiency claim has been earned yet.
