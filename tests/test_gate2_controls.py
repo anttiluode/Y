@@ -58,9 +58,10 @@ def test_lowrank_second_factor_has_variance_matching_scale() -> None:
     # default dense H->R linear map.
     torch.manual_seed(123)
     block = LowRankReducerBlock(64, 16, rank=32)
+    weight = block.reduce_out.weight.detach()
     max_expected = math.sqrt(3.0 / 32.0)
-    assert float(block.reduce_out.weight.abs().max()) <= max_expected + 1e-6
-    assert float(block.reduce_out.weight.std()) > 0.15
+    assert float(weight.abs().max()) <= max_expected + 1e-6
+    assert float(weight.std()) > 0.15
 
 
 def test_fixed_branch_endpoint_uses_exact_budget() -> None:
