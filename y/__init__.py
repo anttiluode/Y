@@ -15,6 +15,8 @@ from .models import (
     MixedBranchMLP,
     NarrowBottleneckBlock,
     PointMLP,
+    PrecollapseReceiverBlock,
+    PrecollapseReceiverMLP,
 )
 
 __all__ = [
@@ -25,6 +27,8 @@ __all__ = [
     "NarrowBottleneckBlock",
     "MixedBranchBlock",
     "MixedBranchMLP",
+    "PrecollapseReceiverBlock",
+    "PrecollapseReceiverMLP",
     "PointMLP",
     "branch_square_weight_count",
     "matched_receiver_width",
