@@ -4,11 +4,25 @@
 
 > **Compute locally. Communicate only what the next stage can use. Change the receiver only when the current receiver is information-limited.**
 
-Y is the pivot from the GeometricNeuron / Dig / PivotPoint / WidePresent research trail toward a concrete AI-efficiency question.
+Y is the pivot from the GeometricNeuron / Dig / PivotPoint / WidePresent trail
+toward a concrete AI-efficiency question.
 
-It is **not** a claim that dendrites make neural networks more expressive. A 2026 paper by Wu et al., *Dendritic nonlinearities mitigate communication costs*, reports the more useful result: when model complexity is controlled, active-dendrite networks can retain comparable learning capacity while local nonlinear aggregation reduces the width that must be communicated onward. Their public code already includes fixed branch-reduce models and a fused Triton branch-matmul -> ReLU -> reduction kernel.
+It is **not** a claim that dendrites make neural networks magically more
+expressive. Wu et al. (2026), *Dendritic nonlinearities mitigate communication
+costs*, report the more useful result: when model complexity is controlled,
+active-dendrite-style networks can retain comparable learning capacity while
+localized nonlinear aggregation reduces the width communicated onward.
 
-Y starts **after** that result.
+Y starts from that engineering observation and tries to falsify the easy story
+before adding anything fancy.
+
+**Provenance note (2026-08-16):** Y has not verified an author-linked public
+implementation of the 2026 paper or a published fused Triton kernel. Earlier Y
+docs accidentally stated that such code had already been verified; that claim
+has been removed. Any fused/local kernel implemented here is a Y systems
+replication unless an author-linked source is explicitly identified later.
+
+---
 
 ## The object
 
@@ -18,124 +32,229 @@ narrow receiver x
        v
    rich local compute
        |
- learned / fixed compression
+ fixed / learned local aggregation
        |
        v
 narrow receiver y
 ```
 
-The paper's branch-reduce construction is one candidate compressor, not an axiom. Y compares it against boring controls at the same receiver width and hidden learned-weight budget.
+The question is not whether the diagram is narrow. The question is whether the
+wide local state can **actually remain local** instead of being materialized,
+written to memory, read back, and merely hidden behind a narrow Python API.
 
-For a square point layer of width `D`, there are roughly `D^2` weights. A K-budget narrow block with receiver width `R` uses
+For receiver width `R` and hidden budget factor `K`, Y uses the explicit learned
+weight budget
 
 ```text
-K * R^2 ~= D^2
+B = K * R^2
 ```
 
-so `K=4` suggests a half-width receiver and `K=16` a quarter-width receiver while preserving the square hidden-core learned-weight count.
+and separates:
 
-## Why this repo exists if the paper already did it
+```text
+logical receiver width
+learned parameters / MACs
+wide local activation width
+PyTorch allocation
+kernel behavior
+wall clock
+physical memory traffic
+energy
+```
 
-Because the earlier repo trail left one useful engineering question behind.
-
-`Dig` found that information is **receiver-relative**: waiting under one readout can accumulate evidence, but it cannot recover distinctions outside that readout's ceiling. `PivotPoint` turned that into an action question: when should a system wait, route, or probe? `GeometricNeuronV23` separately pushed morphology toward **access/search geometry** after passive exact-address stories repeatedly failed strict shuffle tests.
-
-Y asks whether any of that survives ordinary efficiency controls:
-
-> Keep rich computation local behind a narrow interface. Learn only as much receiver machinery as the task actually needs. If that still loses to an ordinary bottleneck, stop decorating it with biology.
-
-Dynamic width, routing, task-aware compression, structured sparsity and MoE already occupy much of this territory. Y therefore uses kill gates and strong controls rather than treating the framing as novelty.
+Those are not interchangeable measurements.
 
 ---
 
-## Gate 0 — fixed aggregation versus ordinary bottleneck
+# Gate 0 — synthetic receiver sanity check
 
-```bash
-pip install -e .
-python experiments/gate0_branch_reduce.py --quick
-```
-
-A methodological correction matters: the first exploratory run did not strictly pair minibatch order across differently shaped architectures. The decisive quarter-width condition was rerun over ten seeds with an explicit identical shuffle generator per model.
-
-Corrected synthetic K=16 result:
+The original exploratory run was not strictly minibatch-paired across
+architectures. The corrected ten-seed quarter-width synthetic means were:
 
 ```text
-branch R=32       0.65015
-bottleneck R=32   0.71748
-postmix R=32      0.46309
+fixed-mean branch R=32   0.65015
+ordinary bottleneck      0.71748
+post-collapse mixer      0.46309
 ```
 
-So:
+What still survives:
 
-- quarter-width communication is not intrinsically impossible;
-- the **compression operator matters**;
-- a learned linear mixer *after* collapse is a bad use of the same budget;
-- fixed dendritic-style averaging is not privileged.
+- quarter-width communication was not intrinsically impossible;
+- a linear mixer **after** collapse was a poor use of the same budget;
+- experimental pairing matters.
 
-See [`docs/GATE0_FIRST_RECEIPT.md`](docs/GATE0_FIRST_RECEIPT.md).
+What no longer survives as a general conclusion is “fixed branch aggregation
+lacks capacity.” Gate 2 later showed that the historical branch `mean` was a
+major optimization-scale confound.
+
+See `docs/GATE0_FIRST_RECEIPT.md` and the correction in
+`docs/GATE2_FAIRNESS_RECEIPT.md`.
 
 ---
 
-## Gate 1 — pre-collapse receiver frontier
+# Gate 1 — pre-collapse learned receiver frontier
 
-Install the no-download external benchmark dependency:
-
-```bash
-pip install -e .[experiments]
-python experiments/gate1_precollapse_frontier.py --quick
-```
-
-At fixed quarter-width receiver `R=32` and fixed hidden learned-weight budget `K*R^2`, `PrecollapseReceiverBlock` trades feature-generation budget against learned reducer budget exactly:
+At fixed `R=32`, `K=16`, Gate 1 moved learned budget from local feature creation
+into a sparse learned correction before collapse:
 
 ```text
 H = K*R - s
-
 R*H + R*s = K*R^2
 ```
 
-where `s` is learned reducer fan-in per receiver output.
+Ten paired Digits splits / 40 epochs produced:
 
-The committed implementation stores only the active sparse correction weights plus fixed indices. The learned correction touches the **pre-collapse local state**.
+| model | reducer budget | local width | mean accuracy |
+|---|---:|---:|---:|
+| point D=128 | — | 128 | 0.97630 |
+| ordinary bottleneck | 50% | 256 | 0.96241 |
+| pre-collapse s=256 | 50% | 256 | 0.96056 |
+| pre-collapse s=128 | 25% | 384 | 0.94426 |
+| pre-collapse s=64 | 12.5% | 448 | 0.93074 |
+| pre-collapse s=32 | 6.25% | 480 | 0.92704 |
+| historical fixed-mean branch | 0% | 512 | 0.57333 |
 
-Ten paired stratified splits of scikit-learn Digits:
+The interior sparse correction did **not** beat the dense bottleneck on the
+first external dataset.
 
-| model | receiver | reducer budget | local width | mean accuracy |
-|---|---:|---:|---:|---:|
-| point D=128 | 1.00x | — | 128 | **0.97630** |
-| ordinary bottleneck | 0.25x | 50% | 256 | **0.96241** |
-| pre-collapse s=256 | 0.25x | 50% | 256 | **0.96056** |
-| pre-collapse s=128 | 0.25x | 25% | 384 | **0.94426** |
-| pre-collapse s=64 | 0.25x | 12.5% | 448 | **0.93074** |
-| pre-collapse s=32 | 0.25x | 6.25% | 480 | **0.92704** |
-| fixed branch | 0.25x | 0% | 512 | **0.57333** |
+But Gate 1's interpretation is now deliberately narrow: its sparse correction
+was zero-initialized on top of the historical fixed-mean receiver. It answers
+whether a cheap correction can grow out of that starting point. It does **not**
+prove that all sparse/local learned receivers intrinsically need 50% of the
+budget.
 
-**Gate 1 verdict: no interior winner.**
-
-The very sparse receiver matched the dense bottleneck on the synthetic teacher after pairing correction, but that did **not** transfer to Digits. On the first external dataset, learned reduction needs to be rich; the 50% candidate merely ties the ordinary bottleneck.
-
-See [`docs/GATE1_PRECOLLAPSE_FRONTIER_RECEIPT.md`](docs/GATE1_PRECOLLAPSE_FRONTIER_RECEIPT.md).
+See `docs/GATE1_PRECOLLAPSE_FRONTIER_RECEIPT.md`.
 
 ---
 
-## What Y is *not* allowed to claim yet
+# Gate 2A — the scale correction
 
-- receiver width is **not** measured DRAM traffic;
+This is the current scientific checkpoint.
+
+The motivating fixed local block aggregates nonlinear branch outputs by **sum**.
+Historical Y used **mean**. With fixed K those have identical connectivity and
+differ only by a constant positive scale — but in an unnormalized deep MLP the
+training behavior was radically different.
+
+Three paired Digits splits / 15 epochs, unnormalized:
+
+```text
+dense             0.921605
+fixed_mean        0.409877
+fixed_sqrt_sum    0.922222
+fixed_sum         0.961728
+```
+
+That enormous gap cannot be a representational-capacity difference: the fixed
+variants have the same learned weights and connectivity.
+
+Gate 2 then inserted parameter-free LayerNorm after every hidden receiver to
+remove positive scale as a confound. Means became:
+
+```text
+dense             0.961111
+grouped2          0.962963
+grouped4          0.973457
+lowrank4          0.947531
+lowrank8          0.954321
+lowrank16         0.953086
+fixed_mean        0.969753
+fixed_sqrt_sum    0.974074
+fixed_sum         0.973457
+```
+
+At this small n, no candidate established a credible accuracy advantage. More
+importantly, fixed local aggregation was no longer inferior to the dense
+bottleneck once scale was controlled.
+
+So Y withdraws the old sentence:
+
+> fixed dendritic pooling loses to an ordinary learned bottleneck
+
+and replaces it with:
+
+> **historical fixed-mean Y blocks optimized badly in the unnormalized Gate
+> 0/1 setup; that is not evidence that fixed local aggregation lacks capacity.**
+
+See `docs/GATE2_FAIRNESS_RECEIPT.md`.
+
+---
+
+# Gate 2B — hardware/locality: OPEN
+
+This is now the serious experiment.
+
+Capacity-side Y has converged back toward the motivating result: rich local
+nonlinear computation can feed a narrow receiver without requiring a special
+learned reducer on this toy. What remains unearned is the thing that matters:
+
+> **Does the wide local state actually cost less to communicate / access on a
+> real GPU?**
+
+The hardware shortlist is intentionally boring:
+
+```text
+dense
+fixed_sum
+grouped2
+grouped4
+lowrank16
+```
+
+Run the dedicated instrument on CUDA:
+
+```bash
+python experiments/gate2_hardware_shortlist.py --backward
+python experiments/gate2_hardware_shortlist.py --backward --dtype float16
+```
+
+Optional compiler comparison:
+
+```bash
+python experiments/gate2_hardware_shortlist.py --compile
+```
+
+The script reports two views:
+
+- `micro`: one exact hidden block repeatedly receives the same input, so raw
+  fixed `sum` cannot explode merely because eight blocks were chained;
+- `stack`: several blocks are chained with the same parameter-free LayerNorm
+  used in the capacity audit.
+
+It measures CUDA wall clock and PyTorch active-allocation peaks. It does **not**
+call those values physical DRAM traffic. Hardware counters / an appropriate
+profiler are required for that claim.
+
+---
+
+## What Y is not allowed to claim yet
+
+- receiver width is **not** measured memory traffic;
 - equal learned weights are **not** equal hardware cost;
-- a sparse reference gather is **not** an efficient kernel;
-- a biology-inspired decomposition is **not** an efficiency win;
-- no new Y block has been found.
-
-The Wu et al. implementation already demonstrates that fused local branch computation can matter on GPU. Y must beat ordinary efficient-linear controls before making any architecture claim of its own.
+- a wide hidden tensor hidden inside a module is **not** local merely because
+  the module returns only R numbers;
+- a sparse gather is **not** an efficient kernel;
+- fixed/grouped aggregation matching Digits is **not** a novel architecture;
+- no Y hardware-efficiency win has been demonstrated.
 
 ---
 
 ## Roadmap
 
-1. **Gate 0 — fixed aggregation:** corrected; ordinary bottleneck beats fixed branch at the decisive quarter-width condition.
-2. **Gate 1 — pre-collapse frontier:** completed on Digits; **no interior winner**.
-3. **Gate 2 — cost/locality:** compare dense bottleneck against low-rank, grouped/block linear, structured sparse and fused-local reducers using real GPU memory/latency measurements. Do not invent routing yet.
-4. **Gate 3 — receiver bank:** only if Gate 2 exposes a real cost/accuracy frontier not already solved by ordinary efficient layers, test context-dependent readouts at the same communication budget.
-5. **Gate 4 — escalate when blind / structural consolidation:** only after the static efficiency story survives.
+1. **Gate 0:** preserve the paired synthetic receipt, but treat the old
+   fixed-mean capacity interpretation as superseded.
+2. **Gate 1:** preserve the sparse-correction null with its narrowed scope.
+3. **Gate 2A:** completed — scale control removes the apparent need for a rich
+   learned reducer on the small Digits test.
+4. **Gate 2B:** measure dense / fixed / grouped / low-rank hardware behavior in
+   eager and compiled execution. If locality is lost to materialization,
+   inspect a fused local kernel next.
+5. **Gate 3 — receiver bank:** only if Gate 2B exposes a real cost/accuracy
+   frontier not already explained by ordinary efficient layers.
+6. **Gate 4 — escalate when blind / structural consolidation:** only after the
+   static efficiency story survives.
+
+Do **not** invent routing yet.
 
 Run tests:
 
@@ -144,10 +263,4 @@ pip install -e .[dev,experiments]
 pytest -q
 ```
 
-See [`docs/FOUNDING.md`](docs/FOUNDING.md) for prior-art boundaries and stop conditions.
-
-## Current status
-
-**The first candidate Y block failed.** That is useful progress.
-
-What remains alive is the broader engineering target: **where should expensive computation live relative to a communication boundary, and what is the cheapest learned receiver that preserves task-relevant distinctions?** The next gate must answer that with ordinary efficient-linear baselines and hardware measurements, not another neuron metaphor.
+Read `HANDOFF_CURRENT.md` first when resuming the project.
