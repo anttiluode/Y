@@ -1,16 +1,16 @@
 """Gate-2 controls for communication-bounded computation.
 
-These blocks deliberately use ordinary efficient-linear ideas.  They are not
-novelty claims and they are not biological models.  Gate 2 asks whether any
+These blocks deliberately use ordinary efficient-linear ideas. They are not
+novelty claims and they are not biological models. Gate 2 asks whether any
 structured/local reducer can preserve the dense bottleneck's accuracy while
 changing *measured* hardware cost.
 
-All blocks expose the same narrow receiver width R.  For a hidden budget
-factor K, the nominal hidden learned-weight budget is
+All blocks expose the same narrow receiver width R. For a hidden budget factor
+K, the nominal hidden learned-weight budget is
 
     B = K * R * R.
 
-The implementations keep logical accounting explicit.  Parameter count,
+The implementations keep logical accounting explicit. Parameter count,
 logical receiver width, CUDA allocation, latency, and physical DRAM traffic
 are different quantities and must not be conflated.
 """
@@ -19,11 +19,15 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from typing import Literal
 
 import torch
 from torch import Tensor, nn
 
 from .layers import BranchReduceLinear
+
+
+FixedReduction = Literal["mean", "sqrt_sum", "sum"]
 
 
 def hidden_budget(receiver_width: int, budget_factor: int) -> int:
@@ -33,11 +37,7 @@ def hidden_budget(receiver_width: int, budget_factor: int) -> int:
 
 
 class DenseBudgetBlock(nn.Module):
-    """Ordinary dense expansion -> ReLU -> dense reduction control.
-
-    This is the Gate-1 bottleneck endpoint written as a standalone hidden
-    block.  When K*R is even, it uses exactly K*R^2 learned weights.
-    """
+    """Ordinary dense expansion -> ReLU -> dense reduction control."""
 
     kind = "dense"
 
@@ -68,8 +68,15 @@ class LowRankReducerBlock(nn.Module):
     """Dense local feature generation with a low-rank learned reducer.
 
     The reducer H -> R is factorized H -> q -> R with no nonlinearity between
-    factors, so it is genuinely a rank-q linear receiver.  Local width H is
+    factors, so it is genuinely a rank-q linear receiver. Local width H is
     chosen as large as possible without exceeding K*R^2 learned weights.
+
+    Initialization is variance-matched to a single default ``nn.Linear(H,R)``.
+    Two independently initialized linear factors otherwise make the effective
+    H->R matrix about sqrt(3) smaller in standard deviation, which unfairly
+    handicaps low rank in short training runs. Scaling the second factor by
+    sqrt(3) makes the effective per-entry variance approximately 1/(3H), the
+    same as PyTorch's default dense linear initialization.
     """
 
     kind = "lowrank"
@@ -92,6 +99,8 @@ class LowRankReducerBlock(nn.Module):
         self.up = nn.Linear(self.receiver_width, self.local_width, bias=False)
         self.reduce_in = nn.Linear(self.local_width, self.rank, bias=False)
         self.reduce_out = nn.Linear(self.rank, self.receiver_width, bias=False)
+        with torch.no_grad():
+            self.reduce_out.weight.mul_(math.sqrt(3.0))
         self.act = nn.ReLU()
 
     def forward(self, x: Tensor) -> Tensor:
@@ -110,9 +119,9 @@ class LowRankReducerBlock(nn.Module):
 class GroupedReducerBlock(nn.Module):
     """Dense local feature generation with a block-diagonal learned receiver.
 
-    ``groups=1`` is exactly the ordinary dense bottleneck endpoint.  Increasing
+    ``groups=1`` is exactly the ordinary dense bottleneck endpoint. Increasing
     groups makes the H -> R receiver increasingly local: each output group can
-    read only its corresponding local feature group.  The saved reducer budget
+    read only its corresponding local feature group. The saved reducer budget
     is spent on more private nonlinear features while total learned weights do
     not exceed K*R^2.
 
@@ -152,8 +161,8 @@ class GroupedReducerBlock(nn.Module):
         )
         self.act = nn.ReLU()
         # Treat each [receiver_per_group, local_per_group] slice like an
-        # independent nn.Linear. Generic kaiming_uniform_ on the 3-D tensor
-        # would incorrectly include receiver_per_group in fan-in.
+        # independent nn.Linear. Generic Kaiming init on this 3-D tensor would
+        # count the receiver axis as fan-in and shrink the grouped control.
         bound = 1.0 / math.sqrt(self.local_per_group)
         nn.init.uniform_(self.weight, -bound, bound)
 
@@ -175,18 +184,37 @@ class GroupedReducerBlock(nn.Module):
 
 
 class FixedBranchBudgetBlock(nn.Module):
-    """Wu-style fixed local nonlinear aggregation endpoint.
+    """Fixed local nonlinear aggregation endpoint.
 
     It spends the full learned hidden budget on R -> K*R feature generation and
-    uses a parameter-free grouped mean for the receiver.
+    uses a parameter-free reducer. Wu et al.'s formal dendritic block **sums**
+    K branch outputs. Earlier Y gates used a mean, which is representationally
+    only a constant rescaling but can change optimization in a deep unnormalized
+    MLP. Gate 2 therefore exposes all three scale controls:
+
+    ``mean``      = sum / K       (historical Y endpoint)
+    ``sqrt_sum``  = sum / sqrt(K) (variance-preserving scale audit)
+    ``sum``       = raw paper-form aggregation
+
+    They have identical parameters and connectivity. A difference between them
+    is an optimization/normalization finding, not an architectural win.
     """
 
     kind = "fixed_branch"
 
-    def __init__(self, receiver_width: int, budget_factor: int) -> None:
+    def __init__(
+        self,
+        receiver_width: int,
+        budget_factor: int,
+        *,
+        reduction: FixedReduction = "mean",
+    ) -> None:
         super().__init__()
+        if reduction not in ("mean", "sqrt_sum", "sum"):
+            raise ValueError("reduction must be mean, sqrt_sum, or sum")
         self.receiver_width = int(receiver_width)
         self.budget_factor = int(budget_factor)
+        self.reduction: FixedReduction = reduction
         self.local_width = self.receiver_width * self.budget_factor
         self.up = nn.Linear(self.receiver_width, self.local_width, bias=False)
         self.act = nn.ReLU()
@@ -194,7 +222,13 @@ class FixedBranchBudgetBlock(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         h = self.act(self.up(x))
         shape = (*h.shape[:-1], self.receiver_width, self.budget_factor)
-        return h.reshape(shape).mean(dim=-1)
+        grouped = h.reshape(shape)
+        if self.reduction == "mean":
+            return grouped.mean(dim=-1)
+        result = grouped.sum(dim=-1)
+        if self.reduction == "sqrt_sum":
+            result = result / math.sqrt(self.budget_factor)
+        return result
 
     @property
     def reducer_weights(self) -> int:
@@ -217,7 +251,7 @@ def block_budget_slack(block: nn.Module) -> int:
 class EfficientControlMLP(nn.Module):
     """Matched narrow MLP for Gate-2 accuracy experiments.
 
-    All variants share the same input stem and output head.  Only the hidden
+    All variants share the same input stem and output head. Only the hidden
     receiver-to-receiver block changes.
     """
 
@@ -263,12 +297,15 @@ def make_control_mlp(
     classes: int,
     rank: int | None = None,
     groups: int | None = None,
+    fixed_reduction: FixedReduction = "mean",
 ) -> EfficientControlMLP:
     kind = kind.lower()
     if kind == "dense":
         factory = lambda: DenseBudgetBlock(receiver_width, budget_factor)
     elif kind == "fixed":
-        factory = lambda: FixedBranchBudgetBlock(receiver_width, budget_factor)
+        factory = lambda: FixedBranchBudgetBlock(
+            receiver_width, budget_factor, reduction=fixed_reduction
+        )
     elif kind == "lowrank":
         if rank is None:
             raise ValueError("lowrank requires rank")
