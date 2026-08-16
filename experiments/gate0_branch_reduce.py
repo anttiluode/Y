@@ -4,6 +4,11 @@ Compares three narrow mechanisms at matched receiver width and hidden weight
 budget: fixed branch reduction, an ordinary learned bottleneck, and a tempting
 post-collapse mixer negative control.
 
+Important pairing rule: every model receives its own DataLoader with an
+explicit identical shuffle generator. Differently shaped architectures consume
+different amounts of RNG during initialization; relying on one shared shuffled
+loader would silently give them different minibatch orders.
+
 The communication metric is a logical activation-width proxy, not measured
 DRAM traffic. Real hardware claims require a fused kernel + profiler gate.
 """
@@ -73,7 +78,32 @@ def accuracy(model: nn.Module, loader: DataLoader, device: torch.device) -> floa
     return right / max(1, total)
 
 
-def train_model(model: nn.Module, train_loader: DataLoader, test_loader: DataLoader, device: torch.device, epochs: int, lr: float) -> tuple[float, float]:
+def train_model(
+    model: nn.Module,
+    x_train: Tensor,
+    y_train: Tensor,
+    x_test: Tensor,
+    y_test: Tensor,
+    *,
+    split_seed: int,
+    device: torch.device,
+    epochs: int,
+    lr: float,
+    batch_size: int,
+) -> tuple[float, float]:
+    shuffle_generator = torch.Generator().manual_seed(split_seed + 424_242)
+    train_loader = DataLoader(
+        TensorDataset(x_train, y_train),
+        batch_size=batch_size,
+        shuffle=True,
+        generator=shuffle_generator,
+    )
+    test_loader = DataLoader(
+        TensorDataset(x_test, y_test),
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
     model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = nn.CrossEntropyLoss()
@@ -107,13 +137,29 @@ def append_result(results, model_name, k, width, model, acc, sec, point_receiver
 def run(args: argparse.Namespace) -> list[Result]:
     seed_all(args.seed)
     device = torch.device(args.device)
-    xtr, ytr, xte, yte = make_teacher_data(args.train_samples, args.test_samples, args.input_dim, args.classes, args.seed)
-    train_loader = DataLoader(TensorDataset(xtr, ytr), batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(TensorDataset(xte, yte), batch_size=args.batch_size, shuffle=False)
+    xtr, ytr, xte, yte = make_teacher_data(
+        args.train_samples,
+        args.test_samples,
+        args.input_dim,
+        args.classes,
+        args.seed,
+    )
 
     results: list[Result] = []
+    seed_all(args.seed)
     point = PointMLP(args.input_dim, args.point_width, args.depth, args.classes)
-    acc, sec = train_model(point, train_loader, test_loader, device, args.epochs, args.lr)
+    acc, sec = train_model(
+        point,
+        xtr,
+        ytr,
+        xte,
+        yte,
+        split_seed=args.seed,
+        device=device,
+        epochs=args.epochs,
+        lr=args.lr,
+        batch_size=args.batch_size,
+    )
     point_receiver_values = args.point_width * args.depth
     results.append(Result(
         model="point", branches=1, receiver_width=args.point_width,
@@ -132,7 +178,18 @@ def run(args: argparse.Namespace) -> list[Result]:
         for name, cls in variants:
             seed_all(args.seed)
             model = cls(args.input_dim, width, args.depth, k, args.classes)
-            acc, sec = train_model(model, train_loader, test_loader, device, args.epochs, args.lr)
+            acc, sec = train_model(
+                model,
+                xtr,
+                ytr,
+                xte,
+                yte,
+                split_seed=args.seed,
+                device=device,
+                epochs=args.epochs,
+                lr=args.lr,
+                batch_size=args.batch_size,
+            )
             append_result(results, f"{name}_k{k}", k, width, model, acc, sec, point_receiver_values, args.depth)
     return results
 
@@ -170,4 +227,7 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     rows = run(args)
-    print(json.dumps([asdict(r) for r in rows], indent=2) if args.json else "") if args.json else print_table(rows)
+    if args.json:
+        print(json.dumps([asdict(r) for r in rows], indent=2))
+    else:
+        print_table(rows)
